@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tally-automation",
+      "runtimeExecutable": "tally_env/Scripts/python.exe",
+      "runtimeArgs": ["-m", "tally_automation"],
+      "port": 8000
+    }
+  ]
+}

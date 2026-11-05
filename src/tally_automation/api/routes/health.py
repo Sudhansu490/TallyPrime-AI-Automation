@@ -27,6 +27,9 @@ class HealthResponse(BaseModel):
     version: str
     environment: str
     database: ComponentStatus
+    # Whether TALLY_HOST is set. This is configuration only: no connection to
+    # TallyPrime is attempted here (that arrives in Phase 6).
+    tally_configured: bool
     tally_write_enabled: bool
 
 
@@ -48,5 +51,6 @@ def health(settings: SettingsDep, engine: EngineDep, response: Response) -> Heal
         version=__version__,
         environment=settings.app_env.value,
         database=database,
+        tally_configured=settings.tally_url is not None,
         tally_write_enabled=settings.tally_write_enabled,
     )

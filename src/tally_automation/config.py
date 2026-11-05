@@ -5,9 +5,10 @@ from __future__ import annotations
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -35,9 +36,13 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///data/tally_automation.db"
     max_upload_size_mb: int = Field(default=20, gt=0, le=100)
 
-    api_host: str = "127.0.0.1"
-    api_port: int = Field(default=8000, ge=1, le=65535)
-    api_base_url: str = "http://127.0.0.1:8000"
+    # Interfaces the single app process listens on. Each must be loopback or a
+    # Tailscale address; see `tally_automation.server.validate_bind_host`.
+    bind_hosts: Annotated[list[str], NoDecode] = ["127.0.0.1"]
+    app_port: int = Field(default=8000, ge=1, le=65535)
+    # Host-header names accepted in addition to loopback names and bind_hosts,
+    # e.g. Computer A's MagicDNS name. Blocks DNS-rebinding attacks.
+    extra_allowed_hosts: Annotated[list[str], NoDecode] = []
 
     llm_provider: str | None = None
     llm_model: str | None = None
@@ -71,6 +76,21 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("bind_hosts", "extra_allowed_hosts", mode="before")
+    @classmethod
+    def _split_comma_list(cls, value: object) -> object:
+        # Environment values are comma-separated: BIND_HOSTS=127.0.0.1,100.x.y.z
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
+
+    @field_validator("bind_hosts")
+    @classmethod
+    def _at_least_one_bind_host(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("bind_hosts must contain at least one address")
+        return value
+
     @field_validator("data_dir")
     @classmethod
     def _absolute_data_dir(cls, value: Path) -> Path:
@@ -101,6 +121,13 @@ class Settings(BaseSettings):
     @property
     def max_upload_size_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024
+
+    @property
+    def allowed_hosts(self) -> list[str]:
+        names = ["127.0.0.1", "localhost", "[::1]", *self.bind_hosts, *self.extra_allowed_hosts]
+        # IPv6 literals appear bracketed in the Host header.
+        names = [f"[{n}]" if ":" in n and not n.startswith("[") else n for n in names]
+        return list(dict.fromkeys(names))
 
     @property
     def tally_url(self) -> str | None:

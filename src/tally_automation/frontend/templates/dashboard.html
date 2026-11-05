@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>Dashboard</h1>
+  <button type="button" class="btn" id="refresh-health">Refresh status</button>
+</div>
+
+<section class="card" aria-labelledby="system-status-heading">
+  <h2 id="system-status-heading">System status</h2>
+  <div id="health-message" role="status" aria-live="polite"></div>
+  <dl class="status-grid" id="health-grid" hidden>
+    <div class="status-item"><dt>Application</dt><dd id="health-app"></dd></div>
+    <div class="status-item"><dt>Database</dt><dd id="health-database"></dd></div>
+    <div class="status-item"><dt>TallyPrime</dt><dd id="health-tally"></dd></div>
+    <div class="status-item"><dt>Tally writes</dt><dd id="health-tally-writes"></dd></div>
+  </dl>
+  <p class="muted" id="health-meta"></p>
+</section>
+
+<section class="card" aria-labelledby="documents-heading">
+  <h2 id="documents-heading">Documents</h2>
+  <p class="muted">
+    Document counts (uploaded, processed, failed, duplicates, pending approval)
+    appear here once document upload is built in Phase 2.
+  </p>
+</section>
+{% endblock %}

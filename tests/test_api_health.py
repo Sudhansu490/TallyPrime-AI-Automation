@@ -14,6 +14,7 @@ def test_health_ok(client: TestClient) -> None:
     assert body["version"] == __version__
     assert body["environment"] == "test"
     assert body["database"] == {"status": "ok", "detail": None}
+    assert body["tally_configured"] is False
     assert body["tally_write_enabled"] is False
 
 
@@ -34,7 +35,7 @@ def test_health_reports_database_failure_without_leaking_details(
 
 def test_docs_disabled_in_production(settings: Settings) -> None:
     production = settings.model_copy(update={"app_env": Environment.PRODUCTION})
-    with TestClient(create_app(production)) as client:
+    with TestClient(create_app(production), base_url="http://127.0.0.1") as client:
         assert client.get("/docs").status_code == 404
         assert client.get("/openapi.json").status_code == 404
         assert client.get("/api/v1/health").status_code == 200

@@ -12,7 +12,7 @@ def make(**overrides: object) -> Settings:
 
 def test_defaults_are_safe() -> None:
     settings = make()
-    assert settings.api_host == "127.0.0.1"
+    assert settings.bind_hosts == ["127.0.0.1"]
     assert settings.tally_write_enabled is False
     assert settings.tally_url is None
     assert settings.max_upload_size_bytes == 20 * 1024 * 1024
@@ -52,7 +52,7 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"tally_port": 0}, {"api_port": 70000}, {"log_level": "verbose"}, {"max_upload_size_mb": 0}],
+    [{"tally_port": 0}, {"app_port": 70000}, {"bind_hosts": ""}, {"log_level": "verbose"}, {"max_upload_size_mb": 0}],
 )
 def test_invalid_values_are_rejected(overrides: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
@@ -64,3 +64,18 @@ def test_ensure_directories_creates_data_tree(tmp_path: Path) -> None:
     settings.ensure_directories()
     assert settings.upload_dir.is_dir()
     assert settings.log_dir.is_dir()
+
+
+def test_bind_and_allowed_hosts_parse_comma_lists(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BIND_HOSTS", "127.0.0.1, 100.95.0.1")
+    monkeypatch.setenv("EXTRA_ALLOWED_HOSTS", "computer-a.example.ts.net")
+    settings = make()
+    assert settings.bind_hosts == ["127.0.0.1", "100.95.0.1"]
+    assert settings.allowed_hosts == [
+        "127.0.0.1", "localhost", "[::1]", "100.95.0.1", "computer-a.example.ts.net",
+    ]
+
+
+def test_ipv6_bind_host_is_bracketed_for_host_header() -> None:
+    settings = make(bind_hosts=["::1", "fd7a:115c:a1e0::1"])
+    assert "[fd7a:115c:a1e0::1]" in settings.allowed_hosts

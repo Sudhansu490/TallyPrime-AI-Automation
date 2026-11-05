@@ -1,7 +1,6 @@
 # Use with: pip install -e ".[dev]" -c constraints.txt
 #
 # paddlepaddle 2.6.2 on Windows requires protobuf<=3.20.2 and fails to import
-# with newer versions. streamlit declares protobuf>=5.26 but its runtime works
-# with 3.20.2 (verified). Without this pin, pip upgrades protobuf and breaks OCR.
-# Revisit in Phase 3 (PaddleOCR 3.x, or a separate UI environment).
+# with newer versions. Without this pin, any package that pulls a newer
+# protobuf breaks OCR. Revisit in Phase 3 (PaddleOCR 3.x).
 protobuf==3.20.2

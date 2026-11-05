@@ -17,12 +17,12 @@ dependencies = [
     "alembic>=1.13",
     "python-dotenv>=1.0",
     "httpx>=0.27",
-    "streamlit>=1.40",
+    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
-# Document processing stack. Already present in tally_env; pinned here for
-# reproducibility. Version alignment (protobuf / OpenCV) is revisited in Phase 3.
+# Document processing stack (Phase 3). Already present in tally_env.
+# Version alignment (protobuf / OpenCV) is revisited in Phase 3.
 ocr = [
     "pymupdf>=1.24",
     "pillow>=10",
@@ -36,6 +36,10 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# HTML templates and static assets are served from inside the package.
+tally_automation = ["frontend/templates/*.html", "frontend/static/**/*"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

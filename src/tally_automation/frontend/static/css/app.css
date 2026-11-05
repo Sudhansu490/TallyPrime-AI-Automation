@@ -1,0 +1,129 @@
+/* Shared stylesheet. No inline styles in templates; no external fonts. */
+
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --text: #1c2430;
+  --muted: #5b6676;
+  --border: #dde1e7;
+  --primary: #1f5fae;
+  --primary-hover: #184b8a;
+  --ok-bg: #e6f4ea;     --ok-fg: #1e6b34;
+  --warn-bg: #fff4d6;   --warn-fg: #7a5200;
+  --error-bg: #fde7e7;  --error-fg: #a11d1d;
+  --info-bg: #e7f0fb;   --info-fg: #1f4f8a;
+  --neutral-bg: #eceff3; --neutral-fg: #3d4756;
+  --radius: 6px;
+  --font: system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html { font-size: 15px; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  line-height: 1.5;
+}
+
+h1 { font-size: 1.6rem; margin: 0; }
+h2 { font-size: 1.15rem; margin: 0 0 0.75rem; }
+
+/* ---- Top bar & navigation ---- */
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.5rem;
+  padding: 0.6rem 1.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-weight: 700; color: var(--text); text-decoration: none; }
+.nav ul { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0; padding: 0; list-style: none; }
+.nav a, .nav-disabled {
+  display: inline-block;
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radius);
+  text-decoration: none;
+}
+.nav a { color: var(--primary); }
+.nav a:hover { background: var(--info-bg); }
+.nav a[aria-current="page"] { background: var(--primary); color: #fff; }
+.nav-disabled { color: var(--muted); cursor: not-allowed; }
+.nav-disabled small { font-size: 0.7rem; opacity: 0.8; }
+
+/* ---- Layout ---- */
+.container { flex: 1; width: 100%; max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+.footer { padding: 0.75rem 1.5rem; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); }
+.muted { color: var(--muted); }
+
+/* ---- Status grid ---- */
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin: 0 0 0.75rem;
+}
+.status-item { padding: 0.75rem; border: 1px solid var(--border); border-radius: var(--radius); }
+.status-item dt { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.35rem; }
+.status-item dd { margin: 0; }
+
+/* ---- Badges & alerts ---- */
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.badge-ok      { background: var(--ok-bg);      color: var(--ok-fg); }
+.badge-warning { background: var(--warn-bg);    color: var(--warn-fg); }
+.badge-error   { background: var(--error-bg);   color: var(--error-fg); }
+.badge-neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
+
+.alert { margin: 0 0 0.75rem; padding: 0.6rem 0.85rem; border-radius: var(--radius); }
+.alert-info, .alert-loading { background: var(--info-bg); color: var(--info-fg); }
+.alert-success { background: var(--ok-bg); color: var(--ok-fg); }
+.alert-warning { background: var(--warn-bg); color: var(--warn-fg); }
+.alert-error   { background: var(--error-bg); color: var(--error-fg); }
+
+/* ---- Buttons ---- */
+.btn {
+  font: inherit;
+  padding: 0.45rem 0.95rem;
+  border: 1px solid var(--primary);
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: #fff;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) { background: var(--primary-hover); }
+.btn:disabled { opacity: 0.6; cursor: progress; }
+.btn:focus-visible, .nav a:focus-visible { outline: 3px solid var(--info-fg); outline-offset: 2px; }
+
+@media (max-width: 640px) {
+  .topbar, .container { padding-left: 1rem; padding-right: 1rem; }
+}

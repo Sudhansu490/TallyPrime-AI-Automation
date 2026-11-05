@@ -45,5 +45,6 @@ def migrated_engine(settings: Settings, alembic_config: Config) -> Iterator[Engi
 
 @pytest.fixture
 def client(settings: Settings, migrated_engine: Engine) -> Iterator[TestClient]:
-    with TestClient(create_app(settings)) as test_client:
+    # A real loopback Host header, so TrustedHostMiddleware is exercised as in production.
+    with TestClient(create_app(settings), base_url="http://127.0.0.1") as test_client:
         yield test_client

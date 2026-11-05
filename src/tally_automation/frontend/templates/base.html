@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en-IN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>{{ title }} · {{ app_name }}</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/app.css?v={{ version }}">
+  <script type="module" src="/static/js/{{ page_script }}?v={{ version }}"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">{{ app_name }}</a>
+    <nav class="nav" aria-label="Main">
+      <ul>
+        {% for item in nav_items %}
+        <li>
+          {% if item.available %}
+          <a href="{{ item.path }}"{% if item.path == current_path %} aria-current="page"{% endif %}>{{ item.label }}</a>
+          {% else %}
+          <span class="nav-disabled" aria-disabled="true" title="Available from Phase {{ item.phase }}">{{ item.label }} <small>P{{ item.phase }}</small></span>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </nav>
+  </header>
+
+  <main class="container" id="main">
+    <noscript><p class="alert alert-error">This application needs JavaScript enabled.</p></noscript>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>{{ app_name }} v{{ version }}</span>
+  </footer>
+</body>
+</html>
