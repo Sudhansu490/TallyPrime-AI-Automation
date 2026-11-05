@@ -39,6 +39,20 @@ class Settings(BaseSettings):
     # Guards against decompression bombs (tiny file, enormous bitmap).
     max_image_megapixels: int = Field(default=50, gt=0, le=200)
 
+    # Background processing (Phase 3). One worker thread, one job at a time:
+    # OCR is CPU-heavy and accuracy matters more than throughput.
+    processing_worker_enabled: bool = True
+    processing_poll_seconds: float = Field(default=2.0, gt=0, le=60)
+    # A PDF page with fewer letters/digits than this in its embedded text is OCR'd.
+    ocr_min_text_chars: int = Field(default=25, ge=1, le=10_000)
+    # Resolution used to render PDF pages for OCR.
+    ocr_render_dpi: int = Field(default=300, ge=100, le=600)
+    # Longest side PaddleOCR's text detector works at. Its default (960) shrinks
+    # an A4 page so much that small invoice text is lost.
+    ocr_det_max_side: int = Field(default=2000, ge=960, le=4000)
+    # OCR lines below this confidence are flagged for human review.
+    ocr_low_confidence: float = Field(default=0.85, gt=0, lt=1)
+
     # Interfaces the single app process listens on. Each must be loopback or a
     # Tailscale address; see `tally_automation.server.validate_bind_host`.
     bind_hosts: Annotated[list[str], NoDecode] = ["127.0.0.1"]

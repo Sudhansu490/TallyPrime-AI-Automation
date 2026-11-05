@@ -3,9 +3,10 @@
 AI-assisted processing of purchase invoices and bank statements into
 TallyPrime vouchers, with mandatory human review and approval.
 
-**Status: Phase 2 (document upload and processing foundation).** Documents can be
-uploaded, validated, de-duplicated (exact file) and queued. Text extraction, OCR, AI
-extraction and Tally communication do not exist yet, so queued documents stay queued.
+**Status: Phase 3 (PDF text extraction and OCR).** Documents are uploaded, validated,
+de-duplicated (exact file), queued, and processed by a background worker that reads
+embedded PDF text and OCRs only the pages that need it. AI extraction and Tally
+communication do not exist yet, so processed documents stop at **Text extracted**.
 Nothing in this codebase can write to TallyPrime.
 
 ## Principles
@@ -55,6 +56,12 @@ src/tally_automation/
     validation.py    extension, magic-byte and structural (PyMuPDF / Pillow) checks
     storage.py       content-addressed, write-once storage of originals
     service.py       ingestion: validate → hash → duplicate check → store → queue
+  processing/
+    pdf_text.py      embedded PDF text (PyMuPDF) and the per-page "needs OCR" decision
+    ocr.py           page rendering / image loading, PaddleOCR engine (CPU), line ordering
+    normalize.py     layout-only text normalisation (never changes digits or symbols)
+    pipeline.py      text stage: embedded text → OCR where needed → normalise
+    worker.py        background thread: claim job → run stages → persist; re-queue
   frontend/
     routes.py        HTML page routes and navigation
     templates/       Jinja2 layout and page shells
@@ -66,8 +73,8 @@ tests/               pytest suite (synthetic data only)
 data/                runtime data: database, uploads, logs (gitignored)
 ```
 
-Modules for text extraction, OCR, AI extraction, validation, duplicates, Tally and
-authentication are added in their own phases.
+Modules for AI extraction, validation, duplicates, Tally and authentication are added
+in their own phases.
 
 ### Frontend rules
 
@@ -109,6 +116,53 @@ error message". Concurrent identical uploads therefore yield exactly one origina
 | `GET /api/v1/documents?status=&document_type=&limit=&offset=` | List, newest first, with the latest job's stage statuses |
 | `GET /api/v1/documents/{id}` | One document |
 | `GET /api/v1/documents/stats` | Dashboard counts (`pending_approvals` is `null` until Phase 8) |
+
+## Text extraction and OCR (Phase 3)
+
+Pipeline steps 5–7 run in a background worker thread inside the app process, one document
+at a time (OCR is CPU-bound, and accuracy matters more than speed). Progress is stored per stage
+on the processing job, and the Processing page polls it.
+
+1. **Embedded text (PDF).** PyMuPDF reads each page's text layer in reading order.
+2. **Per-page OCR decision.** A page is OCR'd only if its text layer has fewer than
+   `OCR_MIN_TEXT_CHARS` letters/digits, or if it is mostly image (≥ 50 %) with under 200
+   letters/digits (a scan with a typed header). Text PDFs never touch OCR.
+3. **OCR.** Pages are rendered at `OCR_RENDER_DPI` (default 300, lowered automatically above
+   `MAX_IMAGE_MEGAPIXELS`); JPEG/PNG are loaded upright (EXIF orientation). PaddleOCR 2.9 runs on
+   CPU with angle classification and its detector at `OCR_DET_MAX_SIDE` px (its 960 px default loses
+   small invoice text). The model loads once, on first use (~20 s), then takes ~5 s per page here.
+   If OCR finds no more text than an existing thin text layer, the text layer is kept.
+4. **Normalisation.** Unicode NFKC, whitespace, line endings and invisible characters only.
+   Digits, ₹, %, punctuation and case are never changed, and nothing is "corrected".
+
+Per page, the database keeps the raw embedded text, the raw OCR text, the normalised text
+that later stages will read, which source was chosen and why, and every OCR line with its
+confidence and bounding box (the source evidence for Phase 4). OCR lines below
+`OCR_LOW_CONFIDENCE` (0.85) are flagged and highlighted in the UI.
+
+| Situation | Text extraction | OCR | Document |
+|---|---|---|---|
+| PDF with a text layer | succeeded | skipped | text_extracted |
+| Scanned PDF, or some pages without text | succeeded | succeeded | text_extracted |
+| JPEG/PNG | skipped | succeeded | text_extracted |
+| No readable text on any page | succeeded / skipped | failed | failed |
+| OCR engine error, missing or unreadable file | the stage that failed, with the reason | | failed |
+| App stopped mid-job | the running stage is failed: "Interrupted…" | | failed |
+
+Failed documents can be re-queued (`POST /api/v1/documents/{id}/reprocess`, or **Reprocess** on the
+Processing page, after a confirmation). Each attempt is a new job; earlier attempts and their errors
+are kept. Interrupted jobs are never restarted automatically, so a document that crashes the process
+cannot loop.
+
+**OCR is not trusted for amounts.** On a small synthetic test image, PaddleOCR read `1,180.00` as
+`1.180.00` with 0.99 confidence; the same text on a full-page 300 DPI scan was read correctly. High
+confidence therefore does not prove a figure. OCR text is stored as recognised, and amounts must be
+checked arithmetically (line totals, taxes, grand total) in Phases 4–5 before anything is accepted.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/documents/{id}/text` | Pages of the latest successful attempt: text, source, raw texts, OCR lines and confidence |
+| `POST /api/v1/documents/{id}/reprocess` | Queue a new attempt for a failed document (409 otherwise) |
 
 **Cross-site protection.** POST/PUT/PATCH/DELETE requests are rejected (403) when the browser's
 `Origin` or `Sec-Fetch-Site` header shows another site. Per-session CSRF tokens arrive with login in Phase 9.
@@ -165,6 +219,8 @@ pytest
 
 Tests use a temporary SQLite database per test, ignore `.env`, never start a
 real server, and never need TallyPrime. Test data is synthetic and labelled as such.
+The worker is disabled in tests and driven directly with a fake OCR engine; one test
+(marker `ocr`, ~25 s) runs the real PaddleOCR. Skip it with `pytest -m "not ocr"`.
 
 ## Database migrations
 
@@ -191,15 +247,21 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | stdlib scrypt for passwords | Memory-hard and OWASP-accepted, with no extra dependency |
 | SQLite in WAL mode, foreign keys on, Alembic batch mode | Concurrent reads during processing; real constraints; SQLite-safe migrations |
 | Swagger `/docs` gets a looser CSP (CDN + inline) | Development only, that path only; disabled in production |
+| In-process worker thread, job state in SQLite | No broker or second service; the browser polls; restart-safe because state is in the database |
+| OCR only pages whose text layer is insufficient | Embedded text is exact and instant; OCR is slow and can misread figures |
+| Keep raw and normalised text, and every OCR line with confidence and box | Later stages can cite evidence; normalisation stays auditable |
+| Migrations disable SQLite foreign keys during batch rebuilds, then run `PRAGMA foreign_key_check` | Rebuilding a referenced table otherwise fails on a non-empty database |
+| Static files sent with `Cache-Control: no-cache` | URLs are not versioned; revalidation (304) prevents stale JavaScript after upgrades |
 
 ## Known issues
 
 | Issue | Effect | Resolution |
 |---|---|---|
 | `paddlepaddle 2.6.2` needs `protobuf<=3.20.2` | A newer protobuf breaks Paddle import | `constraints.txt` pins 3.20.2 |
-| `opencv-python`, `opencv-contrib-python` and `opencv-python-headless` are all installed | They overwrite the same `cv2` module | Reduce to one in Phase 3 |
+| `opencv-python`, `opencv-contrib-python` and `opencv-python-headless` are all installed | They share one `cv2` module (currently 4.11.0, working) | Kept deliberately: PaddleOCR 2.9.1 requires the first two and albumentations requires the headless one, so removing any breaks `pip check` and a reinstall brings it back. `test_real_paddleocr_reads_synthetic_text` proves the combination works. Revisit with PaddleOCR 3.x |
 | Streamlit 1.66 and pyarrow 26 are still installed in `tally_env` (from the earlier UI) | Unused; pyarrow 26 needs NumPy ≥2 | No longer a project dependency. Optional: `pip uninstall streamlit pyarrow` |
-| No processing worker yet | Accepted documents stay `queued` | The worker arrives in Phase 3 with its first real stage (text extraction) |
+| AI extraction does not exist yet | Processed documents stop at `text_extracted` | Phase 4 |
+| PaddleOCR 2.9 import takes ~20 s | The first OCR'd document after startup waits for the model | Loaded once per process, lazily in the worker thread, so app startup is not delayed |
 | No login yet | Anyone who can reach the app can upload | Keep `BIND_HOSTS=127.0.0.1` until Phase 9 |
 | The tailnet contains only Computer A | Computer B and the Tally host cannot connect yet | Join both devices to Computer A's tailnet (account `shivamacc1593@`) |
 | SQLite stores datetimes without an offset | Naive values would reach the browser and be misread as local time | `UtcDateTime` column type stores UTC, always returns UTC-aware values and refuses naive input |
@@ -215,7 +277,7 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 
 ## Phases
 
-1. Foundation ✅ · 2. Upload & processing foundation ✅ · 3. PDF text & OCR ·
+1. Foundation ✅ · 2. Upload & processing foundation ✅ · 3. PDF text & OCR ✅ ·
 4. AI extraction · 5. Duplicates & accounting validation · 6. Tally read-only ·
 7. Voucher generation · 8. Approval & controlled import · 9. Dashboard,
 security & networking · 10. End-to-end testing & deployment

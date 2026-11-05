@@ -162,7 +162,8 @@ def test_get_document_and_404(client: TestClient) -> None:
 
 def test_stats(client: TestClient) -> None:
     assert client.get("/api/v1/documents/stats").json() == {
-        "total": 0, "queued": 0, "processing": 0, "processed": 0, "failed": 0, "duplicates": 0,
+        "total": 0, "queued": 0, "processing": 0, "text_extracted": 0, "processed": 0, "failed": 0,
+        "duplicates": 0,
         "pending_approvals": None,
     }
     data = make_pdf()

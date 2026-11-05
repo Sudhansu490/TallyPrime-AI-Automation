@@ -31,7 +31,8 @@ def test_csp_forbids_inline_and_external_scripts() -> None:
 def test_pages_and_api_are_not_cached(client: TestClient) -> None:
     assert client.get("/").headers["Cache-Control"] == "no-store"
     assert client.get("/api/v1/health").headers["Cache-Control"] == "no-store"
-    assert client.get("/static/js/api.js").headers.get("Cache-Control") != "no-store"
+    # Not versioned: always revalidated, so an upgrade never leaves stale JavaScript.
+    assert client.get("/static/js/api.js").headers["Cache-Control"] == "no-cache"
 
 
 def test_relaxed_csp_only_on_docs(client: TestClient) -> None:

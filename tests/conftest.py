@@ -24,6 +24,8 @@ def settings(tmp_path: Path) -> Settings:
         app_env=Environment.TEST,
         data_dir=tmp_path / "data",
         database_url=f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
+        # Tests drive the worker explicitly (run_once) instead of a background thread.
+        processing_worker_enabled=False,
     )
 
 

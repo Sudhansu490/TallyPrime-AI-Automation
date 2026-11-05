@@ -9,8 +9,9 @@
 </div>
 
 <p class="alert alert-info">
-  Processing stages (text extraction, OCR, AI extraction, validation) are added from Phase 3.
-  Until then, accepted documents stay <strong>Queued</strong>.
+  Documents are processed one at a time: embedded PDF text is read first, and only pages without
+  usable text are OCR'd. AI extraction and validation arrive in Phases 4 and 5, so finished documents
+  currently stop at <strong>Text extracted</strong>.
 </p>
 
 <section class="card">
@@ -20,6 +21,7 @@
         <option value="">All</option>
         <option value="queued">Queued</option>
         <option value="processing">Processing</option>
+        <option value="text_extracted">Text extracted</option>
         <option value="processed">Processed</option>
         <option value="failed">Failed</option>
         <option value="duplicate">Duplicate</option>
@@ -41,7 +43,7 @@
       <thead>
         <tr>
           <th>#</th><th>File</th><th>Type</th><th>Uploaded</th><th>Status</th>
-          <th>Text extraction</th><th>OCR</th><th>AI extraction</th><th>Validation</th><th>Details</th>
+          <th>Text extraction</th><th>OCR</th><th>AI extraction</th><th>Validation</th><th>Details</th><th>Actions</th>
         </tr>
       </thead>
       <tbody id="list-body"></tbody>
@@ -52,5 +54,19 @@
     <span class="muted small" id="page-info"></span>
     <button type="button" class="btn btn-secondary" id="next-page" disabled>Next</button>
   </div>
+</section>
+
+<section class="card" id="text-panel" hidden aria-labelledby="text-heading">
+  <div class="section-header">
+    <h2 id="text-heading">Extracted text</h2>
+    <button type="button" class="btn btn-secondary" id="text-close">Close</button>
+  </div>
+  <p class="muted small" id="text-meta"></p>
+  <p class="muted small">
+    Text is shown as extracted, with layout normalised only. Nothing has been interpreted yet.
+    <span class="low-conf">Highlighted</span> OCR lines are below the confidence threshold and need checking.
+  </p>
+  <div id="text-message" role="status" aria-live="polite"></div>
+  <div id="text-pages"></div>
 </section>
 {% endblock %}

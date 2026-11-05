@@ -5,6 +5,8 @@
 * ``Document`` – one row per upload. A re-upload of identical bytes becomes a
   ``duplicate`` document pointing at the first upload; it is never processed.
 * ``ProcessingJob`` – one row per processing attempt for a document.
+* ``DocumentPage`` – the text of one page, as produced by one processing job
+  (embedded PDF text or OCR), kept raw and normalised, with OCR evidence.
 """
 
 from __future__ import annotations
@@ -12,8 +14,10 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
+from typing import Any
+
 from sqlalchemy import (
-    CheckConstraint, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text,
+    JSON, CheckConstraint, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -34,6 +38,8 @@ class MediaType(StrEnum):
 class DocumentStatus(StrEnum):
     QUEUED = "queued"            # accepted, waiting for processing
     PROCESSING = "processing"
+    # Text extraction / OCR finished. AI extraction (Phase 4) has not run yet.
+    TEXT_EXTRACTED = "text_extracted"
     PROCESSED = "processed"      # processing finished; awaiting human review
     FAILED = "failed"
     DUPLICATE = "duplicate"      # identical bytes already uploaded; not processed
@@ -60,6 +66,11 @@ class ProcessingStage(StrEnum):
     OCR = "ocr"
     AI_EXTRACTION = "ai_extraction"
     VALIDATION = "validation"
+
+
+class TextSource(StrEnum):
+    EMBEDDED = "embedded"        # text layer of the PDF (PyMuPDF)
+    OCR = "ocr"                  # recognised from the rendered page or image
 
 
 class DocumentFile(Base):
@@ -146,6 +157,9 @@ class ProcessingJob(TimestampMixin, Base):
     finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
 
     document: Mapped[Document] = relationship(back_populates="jobs")
+    pages: Mapped[list[DocumentPage]] = relationship(
+        back_populates="job", order_by="DocumentPage.page_number"
+    )
 
     __table_args__ = (
         UniqueConstraint("document_id", "attempt"),
@@ -154,4 +168,46 @@ class ProcessingJob(TimestampMixin, Base):
             "(status = 'failed') = (error_message IS NOT NULL)", name="failed_has_error"
         ),
         Index("ix_processing_jobs_status", "status"),
+    )
+
+
+class DocumentPage(Base):
+    __tablename__ = "document_pages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("processing_jobs.id", ondelete="RESTRICT"))
+    page_number: Mapped[int] = mapped_column(Integer)
+    text_source: Mapped[TextSource] = mapped_column(str_enum(TextSource, "text_source"))
+    # Raw text exactly as produced; NULL when that method did not run on this page.
+    embedded_text: Mapped[str | None] = mapped_column(Text)
+    ocr_text: Mapped[str | None] = mapped_column(Text)
+    # Layout-normalised text from ``text_source``. This is what later stages read.
+    normalized_text: Mapped[str] = mapped_column(Text)
+    char_count: Mapped[int] = mapped_column(Integer)
+    # Why OCR was used for a PDF page (NULL for images and for pages not OCR'd).
+    ocr_reason: Mapped[str | None] = mapped_column(Text)
+    ocr_engine: Mapped[str | None] = mapped_column(String(32))
+    # Evidence for later stages: [{"text", "confidence", "bbox": [x0, y0, x1, y1]}]
+    # in pixels of the image OCR saw (image_width x image_height, at render_dpi).
+    ocr_lines: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    ocr_mean_confidence: Mapped[float | None] = mapped_column(Float)
+    ocr_min_confidence: Mapped[float | None] = mapped_column(Float)
+    ocr_low_confidence_lines: Mapped[int | None] = mapped_column(Integer)
+    render_dpi: Mapped[int | None] = mapped_column(Integer)
+    image_width: Mapped[int | None] = mapped_column(Integer)
+    image_height: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
+
+    job: Mapped[ProcessingJob] = relationship(back_populates="pages")
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "page_number"),
+        CheckConstraint("page_number > 0", name="page_number_positive"),
+        CheckConstraint("char_count >= 0", name="char_count_non_negative"),
+        # The chosen source's raw text must exist.
+        CheckConstraint(
+            "(text_source = 'ocr' AND ocr_text IS NOT NULL AND ocr_engine IS NOT NULL)"
+            " OR (text_source = 'embedded' AND embedded_text IS NOT NULL)",
+            name="source_text_present",
+        ),
     )

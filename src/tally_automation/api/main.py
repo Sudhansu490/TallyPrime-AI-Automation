@@ -27,6 +27,8 @@ from tally_automation.documents.service import DocumentIngestor
 from tally_automation.frontend import routes as frontend_routes
 from tally_automation.frontend.routes import STATIC_DIR
 from tally_automation.logging_config import configure_logging
+from tally_automation.processing.ocr import PaddleOcrEngine
+from tally_automation.processing.worker import ProcessingWorker
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = engine
         app.state.session_factory = create_session_factory(engine)
         app.state.ingestor = DocumentIngestor(settings, app.state.session_factory)
+        worker = None
+        if settings.processing_worker_enabled:
+            # The OCR model loads lazily inside the worker thread on first use.
+            worker = ProcessingWorker(
+                settings, app.state.session_factory,
+                PaddleOcrEngine(det_max_side=settings.ocr_det_max_side),
+            )
+            worker.start()
+        app.state.worker = worker
         logger.info(
             "app started",
             extra={"environment": settings.app_env.value, "tally_write_enabled": settings.tally_write_enabled},
@@ -49,6 +60,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            if worker is not None:
+                worker.stop()
             engine.dispose()
             logger.info("app stopped")
 

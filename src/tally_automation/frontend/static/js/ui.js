@@ -58,6 +58,7 @@ export function setBadge(node, state, text) {
 const STATUS_DISPLAY = {
   queued: ["Queued", "neutral"],
   processing: ["Processing", "info"],
+  text_extracted: ["Text extracted", "info"],
   running: ["Running", "info"],
   processed: ["Processed", "ok"],
   succeeded: ["Succeeded", "ok"],

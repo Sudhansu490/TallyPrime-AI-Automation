@@ -24,8 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Document processing stack (Phase 3). Already present in tally_env.
-# Version alignment (protobuf / OpenCV) is revisited in Phase 3.
+# OCR stack (Phase 3), already present in tally_env. CPU only. paddleocr 2.9.1
+# also pulls opencv-python, opencv-contrib-python and (via albumentations)
+# opencv-python-headless; they share one cv2 module. See README "Known issues".
 ocr = [
     "paddlepaddle==2.6.2",
     "paddleocr==2.9.1",
@@ -47,6 +48,9 @@ minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra --strict-markers"
+markers = [
+    "ocr: runs the real PaddleOCR engine on CPU (slow; deselect with -m 'not ocr')",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:paddle.*",
 ]

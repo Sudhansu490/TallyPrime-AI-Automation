@@ -1,4 +1,4 @@
-"""Document upload, listing and status endpoints."""
+"""Document upload, listing, status, extracted text and reprocessing endpoints."""
 
 from __future__ import annotations
 
@@ -16,9 +16,11 @@ from starlette.datastructures import UploadFile
 
 from tally_automation.api.deps import IngestorDep, SessionDep, SettingsDep
 from tally_automation.db.models import (
-    Document, DocumentStatus, DocumentType, JobStatus, MediaType, ProcessingJob, ProcessingStage, StageStatus,
+    Document, DocumentPage, DocumentStatus, DocumentType, JobStatus, MediaType, ProcessingJob,
+    ProcessingStage, StageStatus, TextSource,
 )
 from tally_automation.documents.validation import FileValidationError, allowed_extensions
+from tally_automation.processing.worker import RequeueError, requeue_failed_document
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -90,6 +92,7 @@ class DocumentStats(BaseModel):
     total: int
     queued: int
     processing: int
+    text_extracted: int
     processed: int
     failed: int
     duplicates: int
@@ -101,6 +104,39 @@ class UploadLimits(BaseModel):
     max_size_bytes: int
     max_pdf_pages: int
     allowed_extensions: dict[DocumentType, list[str]]
+
+
+class OcrLineOut(BaseModel):
+    text: str
+    confidence: float
+    bbox: list[int]
+    low_confidence: bool
+
+
+class PageTextOut(BaseModel):
+    page_number: int
+    text_source: TextSource
+    text: str                       # normalised text from text_source
+    char_count: int
+    embedded_text: str | None       # raw PDF text layer, when it was read
+    ocr_text: str | None            # raw OCR output, when OCR ran
+    ocr_reason: str | None
+    ocr_engine: str | None
+    ocr_mean_confidence: float | None
+    ocr_min_confidence: float | None
+    ocr_low_confidence_lines: int | None
+    ocr_lines: list[OcrLineOut] | None
+    render_dpi: int | None
+    image_width: int | None
+    image_height: int | None
+
+
+class DocumentTextOut(BaseModel):
+    document_id: int
+    job_id: int
+    attempt: int
+    low_confidence_threshold: float
+    pages: list[PageTextOut]
 
 
 class ErrorOut(BaseModel):
@@ -271,6 +307,7 @@ def document_stats(session: SessionDep) -> DocumentStats:
         total=sum(counts.values()),
         queued=counts.get(DocumentStatus.QUEUED, 0),
         processing=counts.get(DocumentStatus.PROCESSING, 0),
+        text_extracted=counts.get(DocumentStatus.TEXT_EXTRACTED, 0),
         processed=counts.get(DocumentStatus.PROCESSED, 0),
         failed=counts.get(DocumentStatus.FAILED, 0),
         duplicates=counts.get(DocumentStatus.DUPLICATE, 0),
@@ -283,4 +320,63 @@ def get_document(document_id: int, session: SessionDep) -> DocumentOut:
     document = _load_document(session, document_id)
     if document is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
+    return document
+
+
+@router.get(
+    "/{document_id}/text", response_model=DocumentTextOut, responses={404: {"model": ErrorOut}},
+)
+def get_document_text(document_id: int, session: SessionDep, settings: SettingsDep) -> DocumentTextOut:
+    """Extracted text of the latest successful processing attempt, page by page."""
+    job = session.scalar(
+        select(ProcessingJob)
+        .options(selectinload(ProcessingJob.pages))
+        .where(ProcessingJob.document_id == document_id, ProcessingJob.status == JobStatus.SUCCEEDED)
+        .order_by(ProcessingJob.attempt.desc()).limit(1)
+    )
+    if job is None:
+        if session.get(Document, document_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No extracted text yet for this document.")
+    threshold = settings.ocr_low_confidence
+    return DocumentTextOut(
+        document_id=document_id, job_id=job.id, attempt=job.attempt,
+        low_confidence_threshold=threshold, pages=[_page_out(page, threshold) for page in job.pages],
+    )
+
+
+def _page_out(page: DocumentPage, threshold: float) -> PageTextOut:
+    lines = None
+    if page.ocr_lines is not None:
+        lines = [
+            OcrLineOut(
+                text=line["text"], confidence=line["confidence"], bbox=line["bbox"],
+                low_confidence=line["confidence"] < threshold,
+            )
+            for line in page.ocr_lines
+        ]
+    return PageTextOut(
+        page_number=page.page_number, text_source=page.text_source, text=page.normalized_text,
+        char_count=page.char_count, embedded_text=page.embedded_text, ocr_text=page.ocr_text,
+        ocr_reason=page.ocr_reason, ocr_engine=page.ocr_engine,
+        ocr_mean_confidence=page.ocr_mean_confidence, ocr_min_confidence=page.ocr_min_confidence,
+        ocr_low_confidence_lines=page.ocr_low_confidence_lines, ocr_lines=lines,
+        render_dpi=page.render_dpi, image_width=page.image_width, image_height=page.image_height,
+    )
+
+
+@router.post(
+    "/{document_id}/reprocess", response_model=DocumentOut,
+    responses={404: {"model": ErrorOut}, 409: {"model": ErrorOut}},
+)
+def reprocess_document(document_id: int, ingestor: IngestorDep) -> DocumentOut | JSONResponse:
+    """Queue a new processing attempt for a failed document. Earlier attempts are kept."""
+    try:
+        requeue_failed_document(ingestor.session_factory, document_id)
+    except RequeueError as exc:
+        code = status.HTTP_404_NOT_FOUND if exc.code == "not_found" else status.HTTP_409_CONFLICT
+        return _error(code, exc.message, exc.code)
+    with ingestor.session_factory() as session:
+        document = _load_document(session, document_id)
+    assert document is not None
     return document

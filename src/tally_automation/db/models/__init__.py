@@ -3,6 +3,7 @@
 from tally_automation.db.models.document import (
     Document,
     DocumentFile,
+    DocumentPage,
     DocumentStatus,
     DocumentType,
     JobStatus,
@@ -10,6 +11,7 @@ from tally_automation.db.models.document import (
     ProcessingJob,
     ProcessingStage,
     StageStatus,
+    TextSource,
 )
 from tally_automation.db.models.user import AppUser, UserRole
 
@@ -17,6 +19,7 @@ __all__ = [
     "AppUser",
     "Document",
     "DocumentFile",
+    "DocumentPage",
     "DocumentStatus",
     "DocumentType",
     "JobStatus",
@@ -24,5 +27,6 @@ __all__ = [
     "ProcessingJob",
     "ProcessingStage",
     "StageStatus",
+    "TextSource",
     "UserRole",
 ]

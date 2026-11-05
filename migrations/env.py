@@ -48,8 +48,16 @@ def run_migrations_online() -> None:
         # The default SQLite file lives under data/, which may not exist yet.
         get_settings().ensure_directories()
     engine = create_db_engine(_database_url())
+    is_sqlite = engine.dialect.name == "sqlite"
     try:
         with engine.connect() as connection:
+            if is_sqlite:
+                # Batch mode rebuilds a table by copy, drop and rename. With foreign
+                # keys enforced, dropping a referenced table fails (or would cascade).
+                # The pragma only works outside a transaction, so it is set here and
+                # integrity is verified explicitly before the migration commits.
+                connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+                connection.commit()
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,
@@ -60,6 +68,12 @@ def run_migrations_online() -> None:
             )
             with context.begin_transaction():
                 context.run_migrations()
+                if is_sqlite:
+                    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+                    if violations:
+                        raise RuntimeError(f"migration left foreign key violations: {violations[:5]}")
+            if is_sqlite:
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
     finally:
         engine.dispose()
 

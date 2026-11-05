@@ -1,4 +1,4 @@
-// Dashboard page: shows backend health. Document statistics arrive in Phase 2.
+// Dashboard page: backend health and document statistics.
 
 import { ApiError, api } from "../api.js";
 import { formatDateTime, setBadge, showError, showMessage, clear } from "../ui.js";
@@ -62,6 +62,7 @@ async function loadStats() {
     const show = (id, value) => { document.getElementById(id).textContent = value === null ? "—" : String(value); };
     show("stat-total", stats.total);
     show("stat-queued", stats.queued + stats.processing);
+    show("stat-text-extracted", stats.text_extracted);
     show("stat-processed", stats.processed);
     show("stat-failed", stats.failed);
     show("stat-duplicates", stats.duplicates);

@@ -90,7 +90,7 @@ def install_security_headers(app: FastAPI, *, docs_path: str | None) -> None:
         for name, value in STATIC_HEADERS.items():
             response.headers[name] = value
         # Pages and API responses may carry financial data: never cache them.
-        # Versioned static assets may be cached by the browser.
-        if not path.startswith("/static/"):
-            response.headers["Cache-Control"] = "no-store"
+        # Static asset URLs are not versioned, so the browser must revalidate them
+        # (cheap 304 via ETag); otherwise it can run stale JavaScript after an upgrade.
+        response.headers["Cache-Control"] = "no-cache" if path.startswith("/static/") else "no-store"
         return response

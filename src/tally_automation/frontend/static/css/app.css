@@ -201,3 +201,15 @@ a.btn { display: inline-block; text-decoration: none; }
 @media (max-width: 640px) {
   .topbar, .container { padding-left: 1rem; padding-right: 1rem; }
 }
+
+/* Extracted text viewer (Processing page) */
+.text-page { border-top: 1px solid var(--border); padding-top: 0.75rem; margin-top: 0.75rem; }
+.text-page h3 { font-size: 1rem; margin: 0 0 0.35rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.page-text {
+  margin: 0.5rem 0; padding: 0.75rem; max-height: 28rem; overflow: auto;
+  background: var(--neutral-bg); border-radius: var(--radius);
+  font-family: Consolas, "Courier New", monospace; font-size: 0.85rem; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.low-conf { background: var(--warn-bg); color: var(--warn-fg); padding: 0 0.2rem; border-radius: 3px; }
+.ocr-lines { margin: 0.35rem 0; padding-left: 1.25rem; font-size: 0.85rem; }
+.btn-small { padding: 0.25rem 0.6rem; font-size: 0.85rem; }
