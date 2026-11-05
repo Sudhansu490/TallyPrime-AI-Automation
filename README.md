@@ -34,9 +34,12 @@ Computer B (browser) ──Tailscale──▶ Computer A: one FastAPI process
 - Only the backend talks to TallyPrime. The browser never does.
 - No port is ever opened to the public internet.
 
-Observed environment (Phase 1 inspection, 2026-11-04): Computer A is
-`desktop-6fjvg7s` (Tailscale `100.95.249.91`). The tailnet has no other devices yet,
-and TallyPrime is not installed on Computer A.
+Observed environment (re-inspected 2026-11-05): Computer A is `SUDHANSU`
+(Tailscale `100.111.30.101`, tailnet account `shivamacc1593@`; Windows 11 Pro,
+i5-12500, 32 GB RAM, no usable GPU, so OCR runs on CPU). The tailnet has no other
+devices yet, and TallyPrime is not installed on Computer A. An earlier inspection on
+2026-11-04 recorded a different machine (`desktop-6fjvg7s`, `100.95.249.91`); that
+entry is superseded.
 
 ## Layout
 
@@ -198,7 +201,7 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | Streamlit 1.66 and pyarrow 26 are still installed in `tally_env` (from the earlier UI) | Unused; pyarrow 26 needs NumPy ≥2 | No longer a project dependency. Optional: `pip uninstall streamlit pyarrow` |
 | No processing worker yet | Accepted documents stay `queued` | The worker arrives in Phase 3 with its first real stage (text extraction) |
 | No login yet | Anyone who can reach the app can upload | Keep `BIND_HOSTS=127.0.0.1` until Phase 9 |
-| The tailnet contains only Computer A | Computer B and the Tally host cannot connect yet | Join both devices to tailnet `shivam-proteco-1997.github` |
+| The tailnet contains only Computer A | Computer B and the Tally host cannot connect yet | Join both devices to Computer A's tailnet (account `shivamacc1593@`) |
 | SQLite stores datetimes without an offset | Naive values would reach the browser and be misread as local time | `UtcDateTime` column type stores UTC, always returns UTC-aware values and refuses naive input |
 
 ## TallyPrime connectivity prerequisites (Phase 6)
