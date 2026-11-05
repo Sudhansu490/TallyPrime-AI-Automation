@@ -19,6 +19,8 @@ import fitz
 import numpy as np
 from PIL import Image, ImageOps
 
+from tally_automation.processing.layout import Box, render_layout
+
 logger = logging.getLogger(__name__)
 
 
@@ -124,25 +126,10 @@ def parse_paddle_result(result: Any) -> list[OcrLine]:
     return lines
 
 
-def lines_to_text(lines: list[OcrLine], *, row_tolerance: float = 0.5) -> str:
-    """Join OCR lines into reading order: rows top-to-bottom, words left-to-right.
+def lines_to_text(lines: list[OcrLine]) -> str:
+    """Join OCR lines into reading order with table columns kept aligned.
 
-    Boxes whose vertical centres are within ``row_tolerance`` × line height of the
-    current row's first box are put on the same output line (separated by two
-    spaces), which keeps table columns such as "Taxable value   1,000.00" together.
+    Rows are grouped by vertical position; within a row each recognised text box
+    starts at a column proportional to its x position (see ``layout``).
     """
-    ordered = sorted(lines, key=lambda l: ((l.bbox[1] + l.bbox[3]) / 2, l.bbox[0]))
-    rows: list[list[OcrLine]] = []
-    for line in ordered:
-        centre = (line.bbox[1] + line.bbox[3]) / 2
-        if rows:
-            anchor = rows[-1][0]
-            anchor_centre = (anchor.bbox[1] + anchor.bbox[3]) / 2
-            height = max(anchor.bbox[3] - anchor.bbox[1], 1)
-            if abs(centre - anchor_centre) <= height * row_tolerance:
-                rows[-1].append(line)
-                continue
-        rows.append([line])
-    return "\n".join(
-        "  ".join(l.text for l in sorted(row, key=lambda l: l.bbox[0])) for row in rows
-    )
+    return render_layout([Box(*line.bbox, line.text) for line in lines])

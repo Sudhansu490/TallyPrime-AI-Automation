@@ -49,24 +49,33 @@ function detailsCell(doc) {
 }
 
 function actionsCell(doc) {
-  const cell = el("td");
+  const cell = el("td", { className: "row-actions" });
+  const button = (text, onClick) => {
+    const node = el("button", { className: "btn btn-secondary btn-small", text, attrs: { type: "button" } });
+    node.addEventListener("click", () => onClick(node));
+    return node;
+  };
+  if (doc.status === "processed") {
+    cell.append(el("a", { className: "btn btn-small", text: "Review", attrs: { href: `/review?document=${doc.id}` } }));
+  }
+  const hasText = doc.latest_job && ["succeeded", "skipped"].includes(doc.latest_job.stages.ocr);
+  if (doc.status === "processed" || doc.status === "text_extracted" || (doc.status === "failed" && hasText)) {
+    cell.append(button("View text", () => showText(doc)));
+  }
   if (doc.status === "text_extracted") {
-    const button = el("button", { className: "btn btn-secondary btn-small", text: "View text", attrs: { type: "button" } });
-    button.addEventListener("click", () => showText(doc));
-    cell.append(button);
+    cell.append(button("Run AI extraction", (node) => reprocess(
+      doc, node, `AI extraction was not configured when “${doc.original_filename}” (#${doc.id}) was processed. Process it again, including AI extraction?`,
+    )));
   } else if (doc.status === "failed") {
-    const button = el("button", { className: "btn btn-secondary btn-small", text: "Reprocess", attrs: { type: "button" } });
-    button.addEventListener("click", () => reprocess(doc, button));
-    cell.append(button);
+    cell.append(button("Reprocess", (node) => reprocess(doc, node)));
   }
   return cell;
 }
 
-async function reprocess(doc, button) {
+async function reprocess(doc, button, question) {
   const ok = window.confirm(
-    `Queue “${doc.original_filename}” (#${doc.id}) for processing again?
-
-The failed attempt stays on record.`,
+    `${question ?? `Queue “${doc.original_filename}” (#${doc.id}) for processing again?`}\n\n` +
+    "Earlier attempts stay on record. If AI extraction is enabled, the document text is sent to the configured LLM provider.",
   );
   if (!ok) return;
   button.disabled = true;

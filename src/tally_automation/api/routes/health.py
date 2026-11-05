@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from tally_automation import __version__
 from tally_automation.api.deps import EngineDep, SettingsDep
 from tally_automation.db.session import check_database
+from tally_automation.extraction.llm import DEFAULT_MODELS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
@@ -31,6 +32,9 @@ class HealthResponse(BaseModel):
     # TallyPrime is attempted here (that arrives in Phase 6).
     tally_configured: bool
     tally_write_enabled: bool
+    # AI extraction configuration (no call is made here). Null provider = disabled.
+    llm_provider: str | None
+    llm_model: str | None
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -53,4 +57,7 @@ def health(settings: SettingsDep, engine: EngineDep, response: Response) -> Heal
         database=database,
         tally_configured=settings.tally_url is not None,
         tally_write_enabled=settings.tally_write_enabled,
+        llm_provider=settings.llm_provider,
+        llm_model=(settings.llm_model or DEFAULT_MODELS.get(settings.llm_provider))
+        if settings.llm_provider else None,
     )

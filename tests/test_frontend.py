@@ -53,6 +53,7 @@ PAGES = [
     ("/", "Dashboard", "pages/dashboard.js"),
     ("/upload", "Upload documents", "pages/upload.js"),
     ("/processing", "Document processing", "pages/processing.js"),
+    ("/review", "Extracted data review", "pages/review.js"),
 ]
 
 
@@ -107,6 +108,7 @@ def test_unbuilt_pages_are_not_served(client: TestClient) -> None:
         ("/static/js/pages/dashboard.js", "text/javascript"),
         ("/static/js/pages/upload.js", "text/javascript"),
         ("/static/js/pages/processing.js", "text/javascript"),
+        ("/static/js/pages/review.js", "text/javascript"),
         ("/static/favicon.svg", "image/svg+xml"),
     ],
 )

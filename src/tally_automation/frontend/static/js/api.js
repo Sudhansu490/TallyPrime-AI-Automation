@@ -87,6 +87,7 @@ export async function apiRequest(path, { method = "GET", body, timeoutMs = DEFAU
 export const api = {
   get: (path, options) => apiRequest(path, { ...options, method: "GET" }),
   post: (path, body, options) => apiRequest(path, { ...options, method: "POST", body }),
+  patch: (path, body, options) => apiRequest(path, { ...options, method: "PATCH", body }),
 };
 
 /**

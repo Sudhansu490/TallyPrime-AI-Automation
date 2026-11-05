@@ -20,7 +20,7 @@ from tally_automation.db.models import (
     ProcessingStage, StageStatus, TextSource,
 )
 from tally_automation.documents.validation import FileValidationError, allowed_extensions
-from tally_automation.processing.worker import RequeueError, requeue_failed_document
+from tally_automation.processing.worker import RequeueError, requeue_document
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -327,11 +327,15 @@ def get_document(document_id: int, session: SessionDep) -> DocumentOut:
     "/{document_id}/text", response_model=DocumentTextOut, responses={404: {"model": ErrorOut}},
 )
 def get_document_text(document_id: int, session: SessionDep, settings: SettingsDep) -> DocumentTextOut:
-    """Extracted text of the latest successful processing attempt, page by page."""
+    """Page text of the latest attempt that produced text, page by page.
+
+    That attempt may have failed at a later stage (e.g. AI extraction); its
+    text is still shown, because it helps explain the failure.
+    """
     job = session.scalar(
         select(ProcessingJob)
         .options(selectinload(ProcessingJob.pages))
-        .where(ProcessingJob.document_id == document_id, ProcessingJob.status == JobStatus.SUCCEEDED)
+        .where(ProcessingJob.document_id == document_id, ProcessingJob.pages.any())
         .order_by(ProcessingJob.attempt.desc()).limit(1)
     )
     if job is None:
@@ -370,9 +374,10 @@ def _page_out(page: DocumentPage, threshold: float) -> PageTextOut:
     responses={404: {"model": ErrorOut}, 409: {"model": ErrorOut}},
 )
 def reprocess_document(document_id: int, ingestor: IngestorDep) -> DocumentOut | JSONResponse:
-    """Queue a new processing attempt for a failed document. Earlier attempts are kept."""
+    """Queue a new attempt (all stages) for a failed document, or for one whose AI
+    extraction has not run yet. Earlier attempts are kept."""
     try:
-        requeue_failed_document(ingestor.session_factory, document_id)
+        requeue_document(ingestor.session_factory, document_id)
     except RequeueError as exc:
         code = status.HTTP_404_NOT_FOUND if exc.code == "not_found" else status.HTTP_409_CONFLICT
         return _error(code, exc.message, exc.code)

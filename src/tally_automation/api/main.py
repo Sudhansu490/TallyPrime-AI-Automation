@@ -20,13 +20,14 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from tally_automation import __version__
 from tally_automation.api.middleware import install_origin_check, install_security_headers
-from tally_automation.api.routes import documents, health
+from tally_automation.api.routes import documents, extractions, health
 from tally_automation.config import Environment, Settings, get_settings
 from tally_automation.db.session import create_db_engine, create_session_factory
 from tally_automation.documents.service import DocumentIngestor
 from tally_automation.frontend import routes as frontend_routes
 from tally_automation.frontend.routes import STATIC_DIR
 from tally_automation.logging_config import configure_logging
+from tally_automation.extraction.llm import create_llm_client
 from tally_automation.processing.ocr import PaddleOcrEngine
 from tally_automation.processing.worker import ProcessingWorker
 
@@ -47,15 +48,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         worker = None
         if settings.processing_worker_enabled:
             # The OCR model loads lazily inside the worker thread on first use.
+            # Fails startup loudly if LLM_PROVIDER is set without a key.
+            llm_client = create_llm_client(settings)
             worker = ProcessingWorker(
                 settings, app.state.session_factory,
-                PaddleOcrEngine(det_max_side=settings.ocr_det_max_side),
+                PaddleOcrEngine(det_max_side=settings.ocr_det_max_side), llm_client,
             )
             worker.start()
         app.state.worker = worker
         logger.info(
             "app started",
-            extra={"environment": settings.app_env.value, "tally_write_enabled": settings.tally_write_enabled},
+            extra={
+                "environment": settings.app_env.value, "tally_write_enabled": settings.tally_write_enabled,
+                "llm_provider": settings.llm_provider,
+            },
         )
         try:
             yield
@@ -86,6 +92,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(documents.router, prefix="/api/v1")
+    app.include_router(extractions.router, prefix="/api/v1")
     app.include_router(frontend_routes.router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app

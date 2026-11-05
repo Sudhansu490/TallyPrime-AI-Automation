@@ -66,7 +66,7 @@ def test_reprocess_failed_document(client: TestClient) -> None:
 def test_reprocess_refuses_non_failed_and_unknown(client: TestClient) -> None:
     created = upload(client, make_pdf())
     response = client.post(f"/api/v1/documents/{created['id']}/reprocess")
-    assert response.status_code == 409 and response.json()["code"] == "not_failed"
+    assert response.status_code == 409 and response.json()["code"] == "not_requeueable"
     response = client.post("/api/v1/documents/999/reprocess")
     assert response.status_code == 404 and response.json()["code"] == "not_found"
 

@@ -13,10 +13,26 @@ from tally_automation.db.models.document import (
     StageStatus,
     TextSource,
 )
+from tally_automation.db.models.extraction import (
+    BankStatement,
+    BankTransaction,
+    EditableEntity,
+    ExtractionRun,
+    FieldEdit,
+    Invoice,
+    InvoiceLineItem,
+)
 from tally_automation.db.models.user import AppUser, UserRole
 
 __all__ = [
     "AppUser",
+    "BankStatement",
+    "BankTransaction",
+    "EditableEntity",
+    "ExtractionRun",
+    "FieldEdit",
+    "Invoice",
+    "InvoiceLineItem",
     "Document",
     "DocumentFile",
     "DocumentPage",

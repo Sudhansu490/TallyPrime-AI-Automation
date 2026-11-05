@@ -61,11 +61,20 @@ class Settings(BaseSettings):
     # e.g. Computer A's MagicDNS name. Blocks DNS-rebinding attacks.
     extra_allowed_hosts: Annotated[list[str], NoDecode] = []
 
+    # AI extraction (Phase 4). Unset provider = extraction disabled: documents
+    # stop at text_extracted and nothing leaves Computer A.
     llm_provider: str | None = None
-    llm_model: str | None = None
+    llm_model: str | None = None          # blank = the provider's default model
     llm_api_key: SecretStr | None = None
     llm_base_url: str | None = None
     llm_timeout_seconds: float = Field(default=60, gt=0)
+    llm_reasoning_effort: str = "medium"  # gpt-oss models: low | medium | high
+    llm_max_retries: int = Field(default=3, ge=0, le=10)
+    llm_max_output_tokens: int = Field(default=32_000, ge=1_000, le=65_000)
+    # Pages sent per LLM call. Long statements are split so output never truncates.
+    llm_pages_per_call: int = Field(default=3, ge=1, le=20)
+    # Fields the model reports below this confidence are flagged for review.
+    llm_low_confidence: float = Field(default=0.8, gt=0, lt=1)
 
     tally_host: str | None = None
     tally_port: int = Field(default=9000, ge=1, le=65535)
@@ -91,6 +100,24 @@ class Settings(BaseSettings):
         # `.env.example` leaves optional values blank; treat them as unset.
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("llm_provider")
+    @classmethod
+    def _known_provider(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().lower()
+        if value not in {"groq"}:
+            raise ValueError(f"unsupported LLM_PROVIDER: {value!r} (supported: groq)")
+        return value
+
+    @field_validator("llm_reasoning_effort")
+    @classmethod
+    def _valid_effort(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"low", "medium", "high"}:
+            raise ValueError("LLM_REASONING_EFFORT must be low, medium or high")
         return value
 
     @field_validator("bind_hosts", "extra_allowed_hosts", mode="before")

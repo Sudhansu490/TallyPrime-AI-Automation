@@ -21,6 +21,7 @@ dependencies = [
     "python-multipart>=0.0.18",   # multipart/form-data parsing for uploads
     "pymupdf>=1.24,<1.25",        # PDF structure validation (Phase 2), text extraction (Phase 3)
     "pillow>=10",                 # image validation (Phase 2), OCR preprocessing (Phase 3)
+    "groq>=1.0,<2",               # LLM provider SDK for AI extraction (Phase 4)
 ]
 
 [project.optional-dependencies]

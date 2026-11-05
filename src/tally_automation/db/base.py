@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
-
 from typing import Any
 
-from sqlalchemy import DateTime, Dialect, Enum, MetaData, func
+from sqlalchemy import DateTime, Dialect, Enum, MetaData, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -48,6 +48,28 @@ class UtcDateTime(TypeDecorator[datetime]):
         if value is None:
             return None
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+class DecimalText(TypeDecorator[Decimal]):
+    """Exact decimals stored as text.
+
+    SQLite has no decimal type: NUMERIC columns are stored as binary floats,
+    so 1180.10 could come back as 1180.0999999. Money is therefore stored as
+    its canonical decimal string and returned as ``Decimal``.
+    """
+
+    impl = String(40)
+    cache_ok = True
+
+    def process_bind_param(self, value: Decimal | str | None, dialect: Dialect) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, float):
+            raise TypeError("float refused for an exact decimal column; pass Decimal or str")
+        return str(Decimal(value))
+
+    def process_result_value(self, value: Any, dialect: Dialect) -> Decimal | None:
+        return None if value is None else Decimal(value)
 
 
 def str_enum(enum_cls: type[StrEnum], name: str, length: int = 32) -> Enum:

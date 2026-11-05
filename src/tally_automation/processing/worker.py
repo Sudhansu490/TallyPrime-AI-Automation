@@ -1,11 +1,14 @@
-"""Background processing worker: claims queued jobs and runs the text stage.
+"""Background processing worker: claims queued jobs and runs the pipeline stages.
 
 One daemon thread inside the app process handles one job at a time. Job state
 lives in the database, so the browser follows progress by polling the API.
 
 Lifecycle of a job: ``queued`` → ``running`` → ``succeeded`` | ``failed``.
-On success the document becomes ``text_extracted`` (AI extraction arrives in
-Phase 4); on failure it becomes ``failed`` with the stage and reason recorded.
+Stages: text extraction / OCR (page text is saved as soon as it exists), then
+AI extraction. On success the document becomes ``processed`` (awaiting human
+review). Without a configured LLM it stops at ``text_extracted`` and no text
+leaves this computer. On failure it becomes ``failed`` with the stage and
+reason recorded.
 
 A job still ``running`` at startup was interrupted (crash or shutdown). It is
 marked failed, not silently restarted, and can be re-queued from the UI.
@@ -24,10 +27,14 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from tally_automation.config import Settings
 from tally_automation.db.base import utc_now
 from tally_automation.db.models import (
-    Document, DocumentPage, DocumentStatus, JobStatus, ProcessingJob, ProcessingStage, StageStatus,
+    Document, DocumentPage, DocumentStatus, DocumentType, JobStatus, MediaType, ProcessingJob,
+    ProcessingStage, StageStatus, TextSource,
 )
 from tally_automation.db.session import transaction
 from tally_automation.documents.storage import DocumentStorage
+from tally_automation.extraction.llm import LlmClient
+from tally_automation.extraction.records import save_extraction
+from tally_automation.extraction.service import ExtractionError, PageInput, extract_document
 from tally_automation.processing.ocr import OcrEngine
 from tally_automation.processing.pipeline import OcrOptions, PageResult, StageError, extract_text
 
@@ -52,8 +59,10 @@ class RequeueError(Exception):
 class ProcessingWorker:
     def __init__(
         self, settings: Settings, session_factory: sessionmaker[Session], ocr_engine: OcrEngine,
+        llm_client: LlmClient | None = None,
     ) -> None:
         self.settings = settings
+        self.llm_client = llm_client
         self.session_factory = session_factory
         self.storage = DocumentStorage(settings.upload_dir)
         self.options = OcrOptions(
@@ -120,7 +129,7 @@ class ProcessingWorker:
         claimed = self._claim()
         if claimed is None:
             return None
-        job_id, relative_path, media_type, document_id = claimed
+        job_id, relative_path, media_type, document_id, document_type = claimed
         current = {"stage": ProcessingStage.TEXT_EXTRACTION}
 
         def on_stage(stage: ProcessingStage, status: StageStatus) -> None:
@@ -140,7 +149,8 @@ class ProcessingWorker:
             logger.exception("unexpected processing error", extra={"job_id": job_id})
             self._fail(job_id, current["stage"], f"Unexpected error: {type(exc).__name__}: {exc}")
         else:
-            self._succeed(job_id, outcome.pages, outcome.text_extraction, outcome.ocr)
+            finished = self.llm_client is None
+            self._save_text(job_id, outcome.pages, outcome.text_extraction, outcome.ocr, finished=finished)
             ocr_pages = sum(1 for p in outcome.pages if p.ocr_text is not None)
             logger.info(
                 "text extracted",
@@ -150,9 +160,55 @@ class ProcessingWorker:
                     "seconds": round(time.perf_counter() - started, 1), "warnings": outcome.warnings,
                 },
             )
+            if not finished:
+                self._run_ai_stage(job_id, document_type, outcome.pages)
         return job_id
 
-    def _claim(self) -> tuple[int, str, object, int] | None:
+    def _run_ai_stage(self, job_id: int, document_type: DocumentType, pages: list[PageResult]) -> None:
+        assert self.llm_client is not None
+        self._set_stage(job_id, ProcessingStage.AI_EXTRACTION, StageStatus.RUNNING)
+        threshold = self.settings.ocr_low_confidence
+        inputs = [
+            PageInput(
+                page_number=p.page_number, text=p.normalized_text, from_ocr=p.text_source is TextSource.OCR,
+                low_confidence_ocr_lines=tuple(
+                    line.text for line in (p.ocr_lines or []) if line.confidence < threshold
+                ) if p.text_source is TextSource.OCR else (),
+            )
+            for p in pages
+        ]
+        try:
+            result = extract_document(
+                inputs, document_type, self.llm_client,
+                pages_per_call=self.settings.llm_pages_per_call,
+                low_confidence=self.settings.llm_low_confidence,
+            )
+        except ExtractionError as exc:
+            self._fail(job_id, ProcessingStage.AI_EXTRACTION, exc.message)
+            return
+        except Exception as exc:
+            logger.exception("unexpected extraction error", extra={"job_id": job_id})
+            self._fail(job_id, ProcessingStage.AI_EXTRACTION, f"Unexpected error: {type(exc).__name__}: {exc}")
+            return
+        with transaction(self.session_factory) as session:
+            job = session.get(ProcessingJob, job_id)
+            assert job is not None
+            save_extraction(session, job_id, job.document, result)
+            job.ai_extraction_status = StageStatus.SUCCEEDED
+            job.status = JobStatus.SUCCEEDED
+            job.finished_at = utc_now()
+            job.document.status = DocumentStatus.PROCESSED
+        logger.info(
+            "AI extraction finished",
+            extra={
+                "job_id": job_id, "provider": result.provider, "model": result.model, "calls": result.calls,
+                "rows": len(result.rows), "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens, "seconds": result.seconds,
+                "document_issues": len(result.document_check_issues),
+            },
+        )
+
+    def _claim(self) -> tuple[int, str, MediaType, int, DocumentType] | None:
         with transaction(self.session_factory) as session:
             job = session.scalar(
                 select(ProcessingJob)
@@ -176,7 +232,7 @@ class ProcessingWorker:
                 return None
             job.document.status = DocumentStatus.PROCESSING
             file = job.document.file
-            return job.id, file.storage_path, file.media_type, job.document_id
+            return job.id, file.storage_path, file.media_type, job.document_id, job.document.document_type
 
     def _set_stage(self, job_id: int, stage: ProcessingStage, status: StageStatus) -> None:
         with transaction(self.session_factory) as session:
@@ -185,18 +241,21 @@ class ProcessingWorker:
                 .values({STAGE_COLUMN[stage]: status, "updated_at": utc_now()})
             )
 
-    def _succeed(
+    def _save_text(
         self, job_id: int, pages: list[PageResult], text_status: StageStatus, ocr_status: StageStatus,
+        *, finished: bool,
     ) -> None:
+        """Store page text. ``finished``: no AI stage follows (no LLM configured)."""
         with transaction(self.session_factory) as session:
             job = session.get(ProcessingJob, job_id)
             assert job is not None
             session.add_all(_page_row(job_id, page) for page in pages)
             job.text_extraction_status = text_status
             job.ocr_status = ocr_status
-            job.status = JobStatus.SUCCEEDED
-            job.finished_at = utc_now()
-            job.document.status = DocumentStatus.TEXT_EXTRACTED
+            if finished:
+                job.status = JobStatus.SUCCEEDED
+                job.finished_at = utc_now()
+                job.document.status = DocumentStatus.TEXT_EXTRACTED
 
     def _fail(self, job_id: int, stage: ProcessingStage, message: str) -> None:
         logger.warning("processing failed", extra={"job_id": job_id, "stage": stage.value, "reason": message})
@@ -230,17 +289,23 @@ def _page_row(job_id: int, page: PageResult) -> DocumentPage:
     )
 
 
-def requeue_failed_document(session_factory: sessionmaker[Session], document_id: int) -> int:
-    """Queue a new processing attempt for a failed document. Returns the new job id."""
+# text_extracted: AI extraction did not run (no LLM was configured at the time).
+REQUEUEABLE = frozenset({DocumentStatus.FAILED, DocumentStatus.TEXT_EXTRACTED})
+
+
+def requeue_document(session_factory: sessionmaker[Session], document_id: int) -> int:
+    """Queue a new processing attempt (all stages). Returns the new job id."""
     with transaction(session_factory) as session:
         document = session.scalar(
             select(Document).options(selectinload(Document.jobs)).where(Document.id == document_id)
         )
         if document is None:
             raise RequeueError("not_found", "Document not found.")
-        if document.status is not DocumentStatus.FAILED:
+        if document.status not in REQUEUEABLE:
             raise RequeueError(
-                "not_failed", f"Only failed documents can be reprocessed (this one is {document.status.value}).",
+                "not_requeueable",
+                "Only failed documents, or documents whose AI extraction has not run, can be reprocessed "
+                f"(this one is {document.status.value}).",
             )
         attempt = max((job.attempt for job in document.jobs), default=0) + 1
         job = ProcessingJob(document=document, attempt=attempt)

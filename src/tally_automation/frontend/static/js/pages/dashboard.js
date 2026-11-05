@@ -27,6 +27,12 @@ function render(health) {
     health.tally_write_enabled ? "ENABLED" : "Disabled",
   );
 
+  setBadge(
+    document.getElementById("health-llm"),
+    health.llm_provider ? "ok" : "neutral",
+    health.llm_provider ? `${health.llm_provider} · ${health.llm_model}` : "Not configured",
+  );
+
   document.getElementById("health-meta").textContent =
     `Version ${health.version} · environment: ${health.environment} · checked ${formatDateTime(new Date().toISOString())}`;
   grid.hidden = false;

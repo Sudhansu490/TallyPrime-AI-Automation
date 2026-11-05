@@ -21,7 +21,7 @@ from tally_automation.db.session import create_session_factory, transaction
 from tally_automation.documents.service import DocumentIngestor
 from tally_automation.processing.ocr import OcrError, OcrLine, RasterImage
 from tally_automation.processing.worker import (
-    INTERRUPTED_MESSAGE, ProcessingWorker, RequeueError, requeue_failed_document,
+    INTERRUPTED_MESSAGE, ProcessingWorker, RequeueError, requeue_document,
 )
 
 INVOICE = DocumentType.PURCHASE_INVOICE
@@ -231,7 +231,7 @@ def test_interrupted_job_is_marked_failed_on_start(settings, factory, ingestor) 
 def test_requeue_creates_new_attempt_and_keeps_history(settings, factory, ingestor) -> None:
     document_id = ingest(ingestor, make_scanned_pdf(), "scan.pdf")
     make_worker(settings, factory, FakeOcrEngine(error="synthetic outage")).run_once()
-    requeue_failed_document(factory, document_id)
+    requeue_document(factory, document_id)
     make_worker(settings, factory).run_once()
     with factory() as session:
         document = session.get(Document, document_id)
@@ -245,10 +245,10 @@ def test_requeue_creates_new_attempt_and_keeps_history(settings, factory, ingest
 def test_requeue_refuses_documents_that_have_not_failed(settings, factory, ingestor) -> None:
     document_id = ingest(ingestor, make_pdf(), "a.pdf")
     with pytest.raises(RequeueError) as excinfo:
-        requeue_failed_document(factory, document_id)
-    assert excinfo.value.code == "not_failed"
+        requeue_document(factory, document_id)
+    assert excinfo.value.code == "not_requeueable"
     with pytest.raises(RequeueError) as excinfo:
-        requeue_failed_document(factory, 999)
+        requeue_document(factory, 999)
     assert excinfo.value.code == "not_found"
 
 

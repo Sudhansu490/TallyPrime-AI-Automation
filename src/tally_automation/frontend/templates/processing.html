@@ -9,9 +9,10 @@
 </div>
 
 <p class="alert alert-info">
-  Documents are processed one at a time: embedded PDF text is read first, and only pages without
-  usable text are OCR'd. AI extraction and validation arrive in Phases 4 and 5, so finished documents
-  currently stop at <strong>Text extracted</strong>.
+  Documents are processed one at a time: embedded PDF text is read first, only pages without usable text
+  are OCR'd, then the text is sent to the configured LLM for structured extraction. Finished documents
+  are <strong>Processed</strong> and ready for review. If no LLM is configured, they stop at
+  <strong>Text extracted</strong> and nothing leaves this computer. Accounting validation arrives in Phase 5.
 </p>
 
 <section class="card">

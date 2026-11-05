@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>Extracted data review</h1>
+  <form class="actions" id="picker">
+    <label class="inline-label">Document
+      <select id="document-select" aria-label="Document to review">
+        <option value="">Loading…</option>
+      </select>
+    </label>
+    <button type="button" class="btn btn-secondary" id="reload">Reload</button>
+  </form>
+</div>
+
+<div id="page-message" role="status" aria-live="polite"></div>
+
+<section class="card" id="overview" hidden aria-labelledby="overview-heading">
+  <h2 id="overview-heading">Overview</h2>
+  <p class="muted small" id="run-meta"></p>
+  <div id="document-issues"></div>
+  <dl class="stat-grid" id="summary"></dl>
+  <p class="legend small">
+    <span class="tag tag-edited">Edited</span> changed by a reviewer ·
+    <span class="tag tag-calculated">Calculated</span> derived, not printed ·
+    <span class="tag tag-low">Low confidence</span> uncertain transcription ·
+    <span class="tag tag-warning">Check</span> needs a look ·
+    <span class="tag tag-invalid">Invalid</span> cannot be used as is ·
+    <span class="muted">—</span> not in the document.
+    Values are shown exactly as transcribed until checked; nothing has been validated for accounting yet (Phase 5).
+  </p>
+</section>
+
+<section class="card" id="header-card" hidden aria-labelledby="header-heading">
+  <h2 id="header-heading">Details</h2>
+  <div class="table-wrap">
+    <table class="table review-table">
+      <thead><tr><th>Field</th><th>Value</th><th>Status</th><th>Evidence (page)</th><th>Confidence</th><th></th></tr></thead>
+      <tbody id="header-body"></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card" id="rows-card" hidden aria-labelledby="rows-heading">
+  <h2 id="rows-heading">Rows</h2>
+  <p class="muted small">Select a cell to see its evidence and edit it.</p>
+  <div class="table-wrap">
+    <table class="table review-table rows-table">
+      <thead><tr id="rows-head"></tr></thead>
+      <tbody id="rows-body"></tbody>
+    </table>
+  </div>
+</section>
+
+<dialog id="edit-dialog" aria-labelledby="edit-title">
+  <form method="dialog" id="edit-form">
+    <h2 id="edit-title">Edit field</h2>
+    <dl class="field-facts" id="edit-facts"></dl>
+    <label class="block-label" for="edit-value">New value <span class="muted small">(type it exactly as printed; leave empty if not in the document)</span></label>
+    <input type="text" id="edit-value" autocomplete="off" maxlength="2000">
+    <label class="block-label" for="edit-reason">Reason <span class="muted small">(optional)</span></label>
+    <input type="text" id="edit-reason" autocomplete="off" maxlength="500">
+    <div id="edit-message" role="status" aria-live="polite"></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-secondary" id="edit-cancel">Cancel</button>
+      <button type="submit" class="btn" id="edit-save">Save</button>
+    </div>
+    <details id="edit-history-wrap">
+      <summary class="small">Edit history for this field</summary>
+      <ul class="small" id="edit-history"></ul>
+    </details>
+  </form>
+</dialog>
+{% endblock %}

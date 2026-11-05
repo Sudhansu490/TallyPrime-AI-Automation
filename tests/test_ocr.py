@@ -27,7 +27,10 @@ def test_lines_to_text_keeps_rows_together_in_reading_order() -> None:
         OcrLine("Header", 0.9, (10, 10, 80, 26)),
         OcrLine("Taxable value", 0.9, (10, 50, 120, 66)),
     ]
-    assert lines_to_text(lines) == "Header\nTaxable value  1,000.00"
+    header, row = lines_to_text(lines).splitlines()
+    assert header == "Header"
+    # The amount keeps its column: a wide gap, not merged into the label.
+    assert row.startswith("Taxable value") and row.endswith("1,000.00") and "     " in row
     assert lines_to_text([]) == ""
 
 

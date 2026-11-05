@@ -8,7 +8,7 @@ from alembic import context
 
 from tally_automation.config import get_settings
 from tally_automation.db import models  # noqa: F401  (registers all tables)
-from tally_automation.db.base import Base, UtcDateTime
+from tally_automation.db.base import Base, DecimalText, UtcDateTime
 from tally_automation.db.session import create_db_engine
 
 config = context.config
@@ -22,6 +22,9 @@ def _render_item(type_: str, obj: object, autogen_context: object) -> str | bool
     # UtcDateTime is a Python-side wrapper; the column itself is a plain DateTime.
     if type_ == "type" and isinstance(obj, UtcDateTime):
         return "sa.DateTime(timezone=True)"
+    # DecimalText is a Python-side wrapper over a text column.
+    if type_ == "type" and isinstance(obj, DecimalText):
+        return "sa.String(length=40)"
     return False
 
 

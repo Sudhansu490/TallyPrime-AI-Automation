@@ -13,6 +13,7 @@
     <div class="status-item"><dt>Database</dt><dd id="health-database"></dd></div>
     <div class="status-item"><dt>TallyPrime</dt><dd id="health-tally"></dd></div>
     <div class="status-item"><dt>Tally writes</dt><dd id="health-tally-writes"></dd></div>
+    <div class="status-item"><dt>AI extraction</dt><dd id="health-llm"></dd></div>
   </dl>
   <p class="muted" id="health-meta"></p>
 </section>
@@ -24,12 +25,12 @@
     <div class="stat"><dt>Total uploaded</dt><dd id="stat-total"></dd></div>
     <div class="stat"><dt>Queued / processing</dt><dd id="stat-queued"></dd></div>
     <div class="stat"><dt>Text extracted</dt><dd id="stat-text-extracted"></dd></div>
-    <div class="stat"><dt>Processed</dt><dd id="stat-processed"></dd></div>
+    <div class="stat"><dt>Processed (to review)</dt><dd id="stat-processed"></dd></div>
     <div class="stat"><dt>Failed</dt><dd id="stat-failed"></dd></div>
     <div class="stat"><dt>Duplicates</dt><dd id="stat-duplicates"></dd></div>
     <div class="stat"><dt>Pending approvals</dt><dd id="stat-approvals"></dd></div>
   </dl>
   <p class="muted small">Voucher approvals become available in Phase 8.</p>
-  <p><a href="/upload">Upload documents</a> · <a href="/processing">View processing status</a></p>
+  <p><a href="/upload">Upload documents</a> · <a href="/processing">View processing status</a> · <a href="/review">Review extracted data</a></p>
 </section>
 {% endblock %}

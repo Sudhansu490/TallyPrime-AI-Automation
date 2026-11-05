@@ -16,6 +16,7 @@ from pathlib import Path
 
 import fitz
 
+from tally_automation.processing.layout import Box, render_layout
 from tally_automation.processing.normalize import meaningful_char_count
 
 # A page mostly covered by images with less text than this is treated as a scan.
@@ -26,7 +27,7 @@ SCANNED_PAGE_TEXT_CEILING = 200
 @dataclass(frozen=True)
 class PdfPageText:
     page_number: int          # 1-based
-    text: str                 # raw embedded text, reading order
+    text: str                 # raw embedded text, reading order, columns kept aligned
     char_count: int           # letters and digits only
     image_coverage: float     # 0..1 share of the page area covered by images
     needs_ocr: bool
@@ -37,8 +38,10 @@ def extract_pdf_text(path: Path, *, min_chars: int) -> list[PdfPageText]:
     pages: list[PdfPageText] = []
     with fitz.open(path) as pdf:
         for index, page in enumerate(pdf):
-            # sort=True orders blocks top-to-bottom, left-to-right (reading order).
-            text = page.get_text("text", sort=True)
+            # Words with coordinates, laid out on a grid so table columns stay
+            # distinguishable (e.g. Withdrawal vs Deposit on a bank statement).
+            words = page.get_text("words", sort=True)
+            text = render_layout([Box(w[0], w[1], w[2], w[3], w[4]) for w in words])
             chars = meaningful_char_count(text)
             coverage = _image_coverage(page)
             reason: str | None = None

@@ -1,9 +1,11 @@
 """Text normalisation for extracted and OCR'd text.
 
-Only *layout* is normalised: Unicode form, whitespace, line endings and
-invisible control characters. Characters that carry meaning (digits, ₹, %,
-punctuation, case) are never changed, removed or "corrected". The raw text is
-always stored alongside, so normalisation can be audited.
+Only *encoding* is normalised: Unicode form, whitespace characters, line
+endings and invisible control characters. Characters that carry meaning
+(digits, ₹, %, punctuation, case) are never changed, removed or "corrected".
+Runs of spaces are kept, because they carry table-column alignment (see
+``layout``); only trailing spaces and excess blank lines are removed. The raw
+text is always stored alongside, so normalisation can be audited.
 """
 
 from __future__ import annotations
@@ -12,7 +14,8 @@ import re
 import unicodedata
 
 # Horizontal whitespace variants (NBSP, thin space, ideographic space, tabs ...).
-_HORIZONTAL_SPACE = re.compile(r"[^\S\n]+")
+# Each becomes one plain space; runs are kept for column alignment.
+_HORIZONTAL_SPACE = re.compile(r"[^\S\n]")
 _MANY_BLANK_LINES = re.compile(r"\n{3,}")
 # Zero-width characters and the BOM: invisible, and they break matching.
 _INVISIBLE = dict.fromkeys(map(ord, "​‌‍⁠﻿"))
@@ -28,8 +31,8 @@ def normalize_text(raw: str) -> str:
         ch for ch in text
         if ch == "\n" or ch == "\t" or not unicodedata.category(ch).startswith("C")
     )
-    lines = [_HORIZONTAL_SPACE.sub(" ", line).strip() for line in text.split("\n")]
-    return _MANY_BLANK_LINES.sub("\n\n", "\n".join(lines)).strip()
+    lines = [_HORIZONTAL_SPACE.sub(" ", line).rstrip() for line in text.split("\n")]
+    return _MANY_BLANK_LINES.sub("\n\n", "\n".join(lines)).strip("\n")
 
 
 def meaningful_char_count(text: str) -> int:
