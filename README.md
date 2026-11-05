@@ -3,12 +3,12 @@
 AI-assisted processing of purchase invoices and bank statements into
 TallyPrime vouchers, with mandatory human review and approval.
 
-**Status: Phase 4 (AI extraction and review).** Documents are uploaded, validated,
-de-duplicated (exact file), and processed by a background worker: embedded PDF text,
-OCR only where needed, then structured extraction by an LLM (Groq). Every field keeps
-its evidence, confidence and status, and reviewers correct values on the Review page
-(audited). Accounting validation (Phase 5) and Tally communication do not exist yet.
-Nothing in this codebase can write to TallyPrime.
+**Status: Phase 5 (duplicates and accounting validation).** Documents are uploaded,
+validated, de-duplicated (exact file), and processed by a background worker: embedded PDF
+text, OCR only where needed, structured extraction by an LLM (Groq), then accounting
+validation and business-level duplicate detection. Reviewers correct values on the Review
+page and decide possible duplicates on the Duplicates page (both audited). Tally
+communication does not exist yet. Nothing in this codebase can write to TallyPrime.
 
 ## Principles
 
@@ -63,7 +63,7 @@ src/tally_automation/
     normalize.py     layout-only text normalisation (never changes digits or symbols)
     pipeline.py      text stage: embedded text → OCR where needed → normalise
     layout.py        layout-preserving text: words placed by x position (keeps table columns)
-    worker.py        background thread: claim job → text → AI extraction → persist; re-queue
+    worker.py        background thread: claim job → text → AI extraction → validation; re-queue
   extraction/
     schemas.py       field catalogues → strict LLM JSON schema and Pydantic response models
     prompts.py       system/user prompts (PROMPT_VERSION is stored with every run)
@@ -71,6 +71,11 @@ src/tally_automation/
     parsing.py       deterministic parsing: amounts, dates, GSTIN (checksum), IFSC, state codes
     service.py       batching, validation, evidence checks, conflict detection
     records.py       persistence, key columns, audited reviewer edits
+    masking.py       account-number masking for every API response
+  validation/
+    accounting.py    extraction and accounting checks (pure functions, never change values)
+    duplicates.py    Level 2 (invoice) and Level 3 (bank transaction) matching rules
+    service.py       run checks, store results, refresh matches, eligibility, reviewer decisions
   frontend/
     routes.py        HTML page routes and navigation
     templates/       Jinja2 layout and page shells
@@ -224,7 +229,7 @@ replies), `invoices` / `invoice_line_items`, `bank_statements` / `bank_transacti
 keeps per-field JSON (`raw`, parsed `value`, `type`, `status`, `method` = extracted / calculated /
 edited, `flags`, `messages`, `evidence`, `page`, `confidence`, `alternatives`) plus typed, indexed
 key columns (GSTIN, invoice number/date, grand total; account number, period; transaction date,
-debit, credit, balance, reference) for queries and Phase 5 duplicate detection. Money is stored
+debit, credit, balance, reference) for queries and duplicate detection (Phase 5). Money is stored
 as exact decimal text, never as floats.
 
 **Review and edits.** The Review page shows each field with its value, status tags
@@ -253,6 +258,86 @@ text itself, unmasked, because it is the source document.
 | Same invoice, scanned | Correct except invoice number: OCR read "SOS" as "s0s" with high confidence. It is in the OCR text, so no check can catch it; the reviewer must. |
 | Bank statement, 2 pages | First run put a ₹25,000 deposit in *debit*: plain text had lost the columns. Fixed by layout-preserving text; re-run correct. Phase 5's running-balance check is the second safety net. |
 | Invoice schema | gpt-oss once answered `{"items": [...]}` instead of an array, so Groq's strict mode is not a guarantee. Describing the array fixed it; Pydantic validation plus one retry stays. |
+
+## Validation and duplicates (Phase 5)
+
+Pipeline step 11. Right after AI extraction, and again after every reviewer edit, the worker
+runs the `validation` package over the stored values. **It never changes a value**: each rule
+reports what it calculated, what was printed and the difference, and a person decides. Calculated
+values appear only in the check results, tagged *Calculated*; they are never written into the
+extracted fields.
+
+**Two categories** (the spec's third, TallyPrime compatibility, comes with Phase 7):
+
+* *Extraction*: invalid or unreadable values, missing required fields, unresolved conflicts
+  between pages (errors); low confidence and parser warnings (warnings).
+* *Accounting*:
+  * **Invoices.** Per line: tax = taxable × rate (error), CGST rate = SGST rate and charged
+    together, never both IGST and CGST/SGST, taxable = qty × rate − discount (warning; some
+    invoices print tax-inclusive rates), and line total.
+  * **Invoice header.** Totals = sum of the lines (taxable, CGST, SGST, IGST, cess), and
+    grand total = taxable + GST + cess + round-off. A missing round-off with a whole-rupee total
+    within ₹1 is a warning, any other difference an error.
+  * **Invoice consistency.** Supplier state versus place of supply (CGST+SGST versus IGST; a
+    warning, because SEZ supplies are legitimate exceptions), the same GSTIN as supplier and
+    buyer, future dates, the due date before the invoice date, and amount payable ≠ grand total.
+  * **Bank statements.** Each row has exactly one of debit or credit, with a date that is
+    present, not in the future and inside the period.
+  * **Statement balances.** The running balance is checked row by row (exact, no tolerance), in
+    chronological order, so statements printed newest first are checked bottom up. A mismatch
+    that disappears when debit and credit are swapped is reported as *probably in the wrong
+    column*. Closing = opening − debits + credits, and it must equal the last row's balance.
+  * **Repeated rows.** Identical rows inside one statement are warned about.
+
+Tolerances are explicit: ₹0.01 for one calculated tax amount, ₹0.01 per line for sums of lines,
+none for bank balances. `Dr` balances are negative, `Cr` or unmarked positive.
+
+Outcome: **passed**, **passed with warnings**, or **failed** (≥1 error). Results are stored per
+extraction run in `validation_results` (`RULES_VERSION` recorded). If validation itself crashes,
+the paid-for extraction is kept (it runs in a savepoint), the stage shows *failed*, and **Run
+validation again** on the Review page retries it without calling the LLM.
+
+**Duplicate detection.** Matches are stored in `duplicate_matches` (one row per pair, enforced
+by a unique key so concurrent detection cannot record a pair twice) with field-by-field evidence
+(same / similar / different / unknown). Nothing is rejected automatically.
+
+| Level | Compares | Rules |
+|---|---|---|
+| 1 | File bytes (SHA-256), at upload | Identical re-upload → recorded as `duplicate`, never processed (Phase 2) |
+| 2 | Invoices across documents | Same supplier GSTIN + same invoice number (letters and digits only) → probable. Number equal after mapping OCR look-alikes (O/0, I/L/1, S/5, B/8, Z/2) → probable with matching date or amount, else possible. GSTIN missing + number + date/amount → probable/possible. Same supplier, date and amount, different number → possible |
+| 3 | Bank transactions of the **same account** in different statements | Fingerprint (SHA-256 of account, date, direction, amount, reference, normalised description), or same date/direction/amount plus the same reference, description or resulting balance → probable |
+
+Two records that only share a date and an amount are **not** flagged. The later upload is the
+candidate duplicate. A reviewer marks a match *duplicate*, *not a duplicate*, or reopens it; every
+decision is appended to `duplicate_reviews` (decision, note, time, device). Unreviewed matches that
+stop applying after an edit (e.g. a corrected invoice number) are removed; decided ones are kept.
+
+**Eligibility for voucher generation** (computed on demand, never cached) requires: document
+processed, validation on the current extraction with **no errors**, and **no unreviewed duplicate
+matches** on either side. A confirmed duplicate invoice is never eligible; a confirmed duplicate
+bank transaction is left out while the rest of its statement stays eligible. Warnings do not
+block; they are shown again at approval (Phase 8).
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/documents/{id}/validation` | Checks, outcome, eligibility and duplicate summary for the current extraction |
+| `POST /api/v1/documents/{id}/validate` | Re-run validation and duplicate detection (no LLM call) |
+| `GET /api/v1/duplicates?status=open\|resolved\|all` | Matches with evidence, plus identical-file re-uploads and counts |
+| `POST /api/v1/duplicates/{id}/review` | Record `duplicate`, `not_duplicate` or `reopened` (optional note) |
+| `POST /api/v1/duplicates/review` | Same decision for up to 500 matches at once, all or nothing (overlapping statements) |
+
+Account numbers are masked in all of these, including inside descriptions in duplicate evidence.
+Reference numbers (UTR, cheque) are shown, since reviewers need them to compare.
+
+**Observed on the synthetic documents from Phase 4 (2026-11-05).** Validation was run over the
+six existing extractions:
+
+* Document 8, the old statement run that put a ₹25,000 deposit in *debit*, now **fails**: the
+  running-balance check reports that transaction 2 *balances only if debit and credit are swapped*,
+  and the closing balance is off by ₹50,000. The corrected re-run (document 11) passes.
+* Document 7, the scanned invoice where OCR read "SOS" as `s0s`, is matched to the same invoice
+  (document 6) by the look-alike rule, the case Phase 4 could not detect.
+* Re-uploads of the same invoices and the same statement were all matched with their evidence.
 
 ## Setup (Windows 11, Python 3.12.10)
 
@@ -344,6 +429,10 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | Field metadata as JSON plus typed key columns | Evidence/confidence/status per field without ~60 extra columns; typed columns where queries and constraints need them |
 | Groq through its own SDK, behind a one-method interface | Strict JSON-schema support; other providers can be added as adapters |
 | Provider error text never includes the generated output | Groq echoes the reply (document content) in schema errors; it must not reach logs or the database |
+| Validation reports, never corrects | Calculated values live only in check results; changing a value is always a reviewer edit, audited |
+| Duplicates are flagged, never rejected | Same date and amount is common for genuine records; a person decides with the evidence |
+| Eligibility computed on demand | Depends on edits, decisions and matches in other documents; a cached flag could go stale |
+| Validation runs in a savepoint after extraction | A bug in validation must not throw away a paid LLM extraction |
 
 ## Known issues
 
@@ -353,8 +442,9 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | `opencv-python`, `opencv-contrib-python` and `opencv-python-headless` are all installed | They share one `cv2` module (currently 4.11.0, working) | Kept deliberately: PaddleOCR 2.9.1 requires the first two and albumentations requires the headless one, so removing any breaks `pip check` and a reinstall brings it back. `test_real_paddleocr_reads_synthetic_text` proves the combination works. Revisit with PaddleOCR 3.x |
 | Streamlit 1.66 and pyarrow 26 are still installed in `tally_env` (from the earlier UI) | Unused; pyarrow 26 needs NumPy ≥2 | No longer a project dependency. Optional: `pip uninstall streamlit pyarrow` |
 | Groq account limit: 8,000 tokens/minute for gpt-oss-120b | One document uses ~4–7k tokens, so about one document per minute; extra documents wait | The client waits for Groq's `retry-after` (up to 90 s, `LLM_MAX_RETRIES` times). For volume, a paid Groq tier |
-| OCR can misread letters as similar digits (`SOS` → `s0s`) with high confidence | Not detectable automatically when the misread text is all there is | Reviewer compares with the document; Phase 5 checks totals and GST arithmetic |
-| Accounting checks (totals, GST, running balance) do not exist yet | A transcription can be internally consistent with the page but arithmetically wrong | Phase 5 |
+| OCR can misread letters as similar digits (`SOS` → `s0s`) with high confidence | The value itself cannot be checked against anything but the page | Reviewer compares with the document. Duplicate detection maps look-alikes, so a misread copy of a known invoice is still matched; arithmetic checks catch misread amounts |
+| Duplicate candidates are compared in Python after an indexed pre-filter (GSTIN, date, amount; account and dates) | Fine for thousands of documents | Revisit with a normalised invoice-number column if volume grows |
+| Validation results become outdated if the rules change | Stored results keep their `rules_version` | **Run validation again** (or `POST /documents/{id}/validate`) re-checks without an LLM call |
 | PaddleOCR 2.9 import takes ~20 s | The first OCR'd document after startup waits for the model | Loaded once per process, lazily in the worker thread, so app startup is not delayed |
 | No login yet | Anyone who can reach the app can upload | Keep `BIND_HOSTS=127.0.0.1` until Phase 9 |
 | The tailnet contains only Computer A | Computer B and the Tally host cannot connect yet | Join both devices to Computer A's tailnet (account `shivamacc1593@`) |
@@ -372,6 +462,6 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 ## Phases
 
 1. Foundation ✅ · 2. Upload & processing foundation ✅ · 3. PDF text & OCR ✅ ·
-4. AI extraction ✅ · 5. Duplicates & accounting validation · 6. Tally read-only ·
+4. AI extraction ✅ · 5. Duplicates & accounting validation ✅ · 6. Tally read-only ·
 7. Voucher generation · 8. Approval & controlled import · 9. Dashboard,
 security & networking · 10. End-to-end testing & deployment

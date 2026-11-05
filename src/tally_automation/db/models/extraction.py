@@ -15,7 +15,7 @@ Each entity keeps its fields in ``fields`` (JSON), one entry per field::
 so value, source evidence, confidence, extraction method and validation
 status travel together. A few typed, indexed *key columns* (GSTIN, invoice
 number, dates, amounts) mirror the reviewed values for querying and for
-duplicate detection in Phase 5; they are set only from valid parsed values.
+duplicate detection (Phase 5); they are set only from valid parsed values.
 """
 
 from __future__ import annotations
@@ -143,6 +143,9 @@ class BankTransaction(TimestampMixin, Base):
     credit: Mapped[Decimal | None] = mapped_column(DecimalText())
     balance: Mapped[Decimal | None] = mapped_column(DecimalText())
     reference_number: Mapped[str | None] = mapped_column(String(64))
+    # Level 3 duplicate fingerprint (SHA-256 of account, date, direction, amount,
+    # reference and normalised description); set by duplicate detection.
+    fingerprint: Mapped[str | None] = mapped_column(String(64), index=True)
 
     statement: Mapped[BankStatement] = relationship(back_populates="transactions")
 

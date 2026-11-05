@@ -46,7 +46,7 @@ NAV_ITEMS: tuple[NavItem, ...] = (
     NavItem("Upload", "/upload", 2, True),
     NavItem("Processing", "/processing", 2, True),
     NavItem("Review", "/review", 4, True),
-    NavItem("Duplicates", "/duplicates", 5, False),
+    NavItem("Duplicates", "/duplicates", 5, True),
     NavItem("TallyPrime", "/tally", 6, False),
     NavItem("Vouchers", "/vouchers", 8, False),
 )
@@ -86,3 +86,8 @@ def processing(request: Request) -> HTMLResponse:
 @router.get("/review", response_class=HTMLResponse)
 def review(request: Request) -> HTMLResponse:
     return _render(request, "review.html", title="Extracted data review", page_script="pages/review.js")
+
+
+@router.get("/duplicates", response_class=HTMLResponse)
+def duplicates(request: Request) -> HTMLResponse:
+    return _render(request, "duplicates.html", title="Duplicate management", page_script="pages/duplicates.js")

@@ -19,7 +19,10 @@ from tally_automation.db.models import (
     Document, DocumentPage, DocumentStatus, DocumentType, JobStatus, MediaType, ProcessingJob,
     ProcessingStage, StageStatus, TextSource,
 )
+from tally_automation.api.routes.validation import DocumentValidationOut, document_validations
+from tally_automation.db.models import ValidationOutcome
 from tally_automation.documents.validation import FileValidationError, allowed_extensions
+from tally_automation.validation.service import eligibility
 from tally_automation.processing.worker import RequeueError, requeue_document
 
 logger = logging.getLogger(__name__)
@@ -79,6 +82,8 @@ class DocumentOut(BaseModel):
     file: FileOut
     duplicate: DuplicateEvidence | None
     latest_job: JobOut | None
+    # Latest accounting validation of the current extraction (Phase 5), if any.
+    validation: DocumentValidationOut | None = None
 
 
 class DocumentList(BaseModel):
@@ -95,7 +100,10 @@ class DocumentStats(BaseModel):
     text_extracted: int
     processed: int
     failed: int
-    duplicates: int
+    duplicates: int                     # byte-identical re-uploads (Level 1)
+    possible_duplicates: int            # documents with unreviewed Level 2/3 matches
+    validation_failed: int              # processed documents whose validation has errors
+    ready_for_vouchers: int             # processed, validated without errors, duplicates reviewed
     # Vouchers and approvals do not exist before Phase 8; null means "not available".
     pending_approvals: int | None
 
@@ -158,7 +166,7 @@ def _job_out(job: ProcessingJob) -> JobOut:
     )
 
 
-def _document_out(document: Document) -> DocumentOut:
+def _document_out(document: Document, validation: DocumentValidationOut | None = None) -> DocumentOut:
     duplicate = None
     if document.duplicate_of is not None:
         original = document.duplicate_of
@@ -183,6 +191,7 @@ def _document_out(document: Document) -> DocumentOut:
         ),
         duplicate=duplicate,
         latest_job=_job_out(document.jobs[-1]) if document.jobs else None,
+        validation=validation,
     )
 
 
@@ -194,7 +203,9 @@ def _document_query():
 
 def _load_document(session: Session, document_id: int) -> DocumentOut | None:
     document = session.scalar(_document_query().where(Document.id == document_id))
-    return _document_out(document) if document else None
+    if document is None:
+        return None
+    return _document_out(document, document_validations(session, [document_id]).get(document_id))
 
 
 def _error(status_code: int, detail: str, code: str | None = None) -> JSONResponse:
@@ -297,12 +308,17 @@ def list_documents(
     documents = session.scalars(
         _document_query().where(*conditions).order_by(Document.id.desc()).limit(limit).offset(offset)
     ).all()
-    return DocumentList(items=[_document_out(d) for d in documents], total=total, limit=limit, offset=offset)
+    validations = document_validations(session, [d.id for d in documents])
+    return DocumentList(
+        items=[_document_out(d, validations.get(d.id)) for d in documents], total=total, limit=limit, offset=offset,
+    )
 
 
 @router.get("/stats", response_model=DocumentStats)
 def document_stats(session: SessionDep) -> DocumentStats:
     counts = dict(session.execute(select(Document.status, func.count()).group_by(Document.status)).all())
+    processed_ids = list(session.scalars(select(Document.id).where(Document.status == DocumentStatus.PROCESSED)))
+    validations = document_validations(session, processed_ids)
     return DocumentStats(
         total=sum(counts.values()),
         queued=counts.get(DocumentStatus.QUEUED, 0),
@@ -311,6 +327,9 @@ def document_stats(session: SessionDep) -> DocumentStats:
         processed=counts.get(DocumentStatus.PROCESSED, 0),
         failed=counts.get(DocumentStatus.FAILED, 0),
         duplicates=counts.get(DocumentStatus.DUPLICATE, 0),
+        possible_duplicates=sum(1 for v in validations.values() if v.open_duplicates),
+        validation_failed=sum(1 for v in validations.values() if v.outcome is ValidationOutcome.FAILED),
+        ready_for_vouchers=sum(1 for doc_id in processed_ids if eligibility(session, doc_id).eligible),
         pending_approvals=None,
     )
 

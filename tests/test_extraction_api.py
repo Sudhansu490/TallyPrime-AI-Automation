@@ -55,7 +55,7 @@ def test_worker_runs_ai_stage_and_stores_entities(client: TestClient, invoice_id
     document = client.get(f"/api/v1/documents/{invoice_id}").json()
     assert document["status"] == "processed"
     assert document["latest_job"]["stages"] == {
-        "text_extraction": "succeeded", "ocr": "skipped", "ai_extraction": "succeeded", "validation": "pending",
+        "text_extraction": "succeeded", "ocr": "skipped", "ai_extraction": "succeeded", "validation": "succeeded",
     }
     with client.app.state.session_factory() as session:
         invoice = session.scalars(select(Invoice)).one()

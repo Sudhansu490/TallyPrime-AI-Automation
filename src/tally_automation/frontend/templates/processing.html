@@ -12,7 +12,7 @@
   Documents are processed one at a time: embedded PDF text is read first, only pages without usable text
   are OCR'd, then the text is sent to the configured LLM for structured extraction. Finished documents
   are <strong>Processed</strong> and ready for review. If no LLM is configured, they stop at
-  <strong>Text extracted</strong> and nothing leaves this computer. Accounting validation arrives in Phase 5.
+  <strong>Text extracted</strong> and nothing leaves this computer. After extraction, accounting validation and duplicate detection run automatically; the Validation column shows the result.
 </p>
 
 <section class="card">

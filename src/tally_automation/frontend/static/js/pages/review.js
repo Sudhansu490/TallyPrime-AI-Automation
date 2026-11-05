@@ -133,6 +133,107 @@ function render(data) {
   renderRows(data);
 }
 
+// ---- Validation -----------------------------------------------------------------------
+
+const OUTCOME = {
+  passed: ["Passed", "ok"],
+  passed_with_warnings: ["Passed with warnings", "warning"],
+  failed: ["Failed", "error"],
+};
+const SEVERITY = { error: ["Error", "error"], warning: ["Warning", "warning"], info: ["Info", "neutral"] };
+
+function checkItem(check) {
+  const [label, kind] = check.passed ? ["OK", "ok"] : SEVERITY[check.severity];
+  const rowName = state.extraction?.document_type === "bank_statement" ? "Transaction" : "Line";
+  const where = check.row ? `${rowName} ${check.row}: ` : "";
+  const item = el("li", { className: `check check-${check.passed ? "passed" : check.severity}` }, [
+    el("span", { className: `badge badge-${kind}`, text: label }),
+    el("span", { className: "check-category small muted", text: check.category === "extraction" ? "Extraction" : "Accounting" }),
+    el("span", { text: `${where}${check.message}` }),
+  ]);
+  const numbers = [];
+  if (check.calculated !== null) numbers.push(`calculated ${formatINR(check.calculated)}`);
+  if (check.printed !== null && check.category === "accounting") numbers.push(`printed ${formatINR(check.printed)}`);
+  if (check.difference !== null && !check.passed) numbers.push(`difference ${formatINR(check.difference)}`);
+  if (numbers.length) {
+    const parts = [el("span", { text: numbers.join(" · ") })];
+    if (check.calculated !== null) parts.unshift(el("span", { className: "tag tag-calculated", text: "Calculated" }));
+    item.append(el("div", { className: "small check-numbers" }, parts));
+  }
+  return item;
+}
+
+function renderValidation(v) {
+  const [outcomeText, outcomeKind] = OUTCOME[v.outcome];
+  const status = $("validation-status");
+  clear(status);
+  status.append(el("p", {}, [
+    el("span", { className: `badge badge-${outcomeKind}`, text: outcomeText }),
+    el("span", { text: ` ${v.error_count} error(s), ${v.warning_count} warning(s) · rules ${v.rules_version} · ${formatDateTime(v.validated_at)}` }),
+  ]));
+  const e = v.eligibility;
+  status.append(e.eligible
+    ? el("p", { className: "alert alert-success", text: "Eligible for voucher generation (Phase 7), subject to approval." })
+    : el("div", { className: "alert alert-warning" }, [
+      el("strong", { text: "Not yet eligible for voucher generation:" }),
+      el("ul", {}, e.reasons.map((r) => el("li", { text: r }))),
+    ]));
+  if (e.excluded_transaction_ids.length) {
+    status.append(el("p", { className: "small muted", text: `${e.excluded_transaction_ids.length} transaction(s) confirmed as duplicates will be left out.` }));
+  }
+
+  const dups = $("validation-duplicates");
+  clear(dups);
+  const open = v.duplicates.filter((d) => d.status === "open");
+  if (v.duplicates.length) {
+    dups.append(el("p", {}, [
+      el("span", { className: `badge badge-${open.length ? "warning" : "neutral"}`, text: `${v.duplicates.length} possible duplicate(s)` }),
+      el("span", { text: open.length ? ` ${open.length} not reviewed yet. ` : " All reviewed. " }),
+      el("a", { text: "Open duplicate management", attrs: { href: "/duplicates" } }),
+    ]));
+  }
+
+  const problems = $("validation-problems");
+  clear(problems);
+  const failing = v.checks.filter((c) => !c.passed && c.severity !== "info");
+  const order = { error: 0, warning: 1 };
+  failing.sort((a, b) => order[a.severity] - order[b.severity] || (a.row ?? 0) - (b.row ?? 0));
+  if (failing.length) problems.append(el("ul", { className: "check-list" }, failing.map(checkItem)));
+  else problems.append(el("p", { className: "muted", text: "No errors or warnings." }));
+
+  const passed = v.checks.filter((c) => c.passed || c.severity === "info");
+  const list = $("validation-passed");
+  clear(list);
+  for (const c of passed) list.append(checkItem(c));
+  $("validation-passed-summary").textContent = `Checks that passed or could not run (${passed.length})`;
+  $("validation-card").hidden = false;
+}
+
+async function loadValidation() {
+  clear($("validation-message"));
+  try {
+    renderValidation(await api.get(`/documents/${state.documentId}/validation`));
+  } catch (error) {
+    for (const id of ["validation-status", "validation-problems", "validation-duplicates", "validation-passed"]) clear($(id));
+    showError($("validation-message"), error);
+    $("validation-card").hidden = false;
+  }
+}
+
+async function revalidate() {
+  const button = $("revalidate");
+  button.disabled = true;
+  showMessage($("validation-message"), "loading", "Validating…");
+  try {
+    renderValidation(await api.post(`/documents/${state.documentId}/validate`));
+    showMessage($("validation-message"), "success", "Validation and duplicate detection ran again.");
+  } catch (error) {
+    showError($("validation-message"), error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 // ---- Editing ------------------------------------------------------------------------
 
 function fact(label, value) {
@@ -192,13 +293,16 @@ async function saveEdit(event) {
   $("edit-save").disabled = true;
   showMessage($("edit-message"), "loading", "Saving…");
   try {
-    await api.patch(`/extractions/${entity}/${id}/fields/${field.name}`, {
+    const result = await api.patch(`/extractions/${entity}/${id}/fields/${field.name}`, {
       value: value === "" ? null : value,
       reason: reason === "" ? null : reason,
     });
     $("edit-dialog").close();
     await loadExtraction();
-    showMessage($("page-message"), "success", `${field.label} updated. The change is recorded in the edit history.`);
+    const v = result.validation;
+    showMessage($("page-message"), "success", `${field.label} updated. The change is recorded in the edit history. ` +
+      (v ? `Validation ran again: ${OUTCOME[v.outcome][0].toLowerCase()} (${v.error_count} error(s), ${v.warning_count} warning(s)).`
+        : "Validation could not run; use “Run validation again”."));
   } catch (error) {
     showError($("edit-message"), error);
     $("edit-save").disabled = false;
@@ -227,11 +331,12 @@ async function loadDocuments() {
 
 async function loadExtraction() {
   if (!state.documentId) return;
-  for (const id of ["overview", "header-card", "rows-card"]) $(id).hidden = true;
+  for (const id of ["overview", "validation-card", "header-card", "rows-card"]) $(id).hidden = true;
   showMessage($("page-message"), "loading", "Loading extracted data…");
   try {
     render(await api.get(`/documents/${state.documentId}/extraction`));
     clear($("page-message"));
+    await loadValidation();
   } catch (error) {
     showError($("page-message"), error);
   }
@@ -251,6 +356,7 @@ $("reload").addEventListener("click", () => { loadDocuments(); loadExtraction();
 $("picker").addEventListener("submit", (event) => event.preventDefault());
 $("edit-form").addEventListener("submit", saveEdit);
 $("edit-cancel").addEventListener("click", () => $("edit-dialog").close());
+$("revalidate").addEventListener("click", revalidate);
 
 const initial = Number(new URLSearchParams(window.location.search).get("document"));
 state.documentId = Number.isInteger(initial) && initial > 0 ? initial : null;

@@ -5,7 +5,7 @@ lives in the database, so the browser follows progress by polling the API.
 
 Lifecycle of a job: ``queued`` → ``running`` → ``succeeded`` | ``failed``.
 Stages: text extraction / OCR (page text is saved as soon as it exists), then
-AI extraction. On success the document becomes ``processed`` (awaiting human
+AI extraction, then validation and duplicate detection. On success the document becomes ``processed`` (awaiting human
 review). Without a configured LLM it stops at ``text_extracted`` and no text
 leaves this computer. On failure it becomes ``failed`` with the stage and
 reason recorded.
@@ -37,6 +37,7 @@ from tally_automation.extraction.records import save_extraction
 from tally_automation.extraction.service import ExtractionError, PageInput, extract_document
 from tally_automation.processing.ocr import OcrEngine
 from tally_automation.processing.pipeline import OcrOptions, PageResult, StageError, extract_text
+from tally_automation.validation.service import validate_document
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,7 @@ class ProcessingWorker:
             logger.exception("unexpected extraction error", extra={"job_id": job_id})
             self._fail(job_id, ProcessingStage.AI_EXTRACTION, f"Unexpected error: {type(exc).__name__}: {exc}")
             return
+        validation = None
         with transaction(self.session_factory) as session:
             job = session.get(ProcessingJob, job_id)
             assert job is not None
@@ -198,6 +200,18 @@ class ProcessingWorker:
             job.status = JobStatus.SUCCEEDED
             job.finished_at = utc_now()
             job.document.status = DocumentStatus.PROCESSED
+            session.flush()
+            # Validation is plain code over the saved data. A failure there must not
+            # discard the (paid-for) extraction: it runs in a savepoint, and the stage
+            # is marked failed so a person can re-run it from the Review page.
+            try:
+                with session.begin_nested():
+                    outcome = validate_document(session, job.document_id)
+                    validation = (outcome.outcome.value, outcome.error_count, outcome.warning_count)
+                job.validation_status = StageStatus.SUCCEEDED
+            except Exception:
+                logger.exception("validation error", extra={"job_id": job_id})
+                job.validation_status = StageStatus.FAILED
         logger.info(
             "AI extraction finished",
             extra={
@@ -207,6 +221,11 @@ class ProcessingWorker:
                 "document_issues": len(result.document_check_issues),
             },
         )
+        if validation is not None:
+            logger.info(
+                "validation finished",
+                extra={"job_id": job_id, "outcome": validation[0], "errors": validation[1], "warnings": validation[2]},
+            )
 
     def _claim(self) -> tuple[int, str, MediaType, int, DocumentType] | None:
         with transaction(self.session_factory) as session:

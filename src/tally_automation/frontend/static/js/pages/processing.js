@@ -27,6 +27,28 @@ function stageCell(job, stage) {
   return el("td", {}, [job ? statusBadge(job.stages[stage]) : el("span", { className: "muted", text: "—" })]);
 }
 
+const OUTCOME = {
+  passed: ["Passed", "ok"],
+  passed_with_warnings: ["Warnings", "warning"],
+  failed: ["Errors", "error"],
+};
+
+function validationCell(doc) {
+  const v = doc.validation;
+  if (!v) return stageCell(doc.latest_job, "validation");
+  const [text, kind] = OUTCOME[v.outcome];
+  const cell = el("td", {}, [el("span", {
+    className: `badge badge-${kind}`, text,
+    attrs: { title: `${v.error_count} error(s), ${v.warning_count} warning(s)` },
+  })]);
+  if (v.open_duplicates) {
+    cell.append(el("div", {}, [el("a", {
+      className: "small", text: `${v.open_duplicates} possible duplicate(s)`, attrs: { href: "/duplicates" },
+    })]));
+  }
+  return cell;
+}
+
 function detailsCell(doc) {
   const cell = el("td", { className: "details" });
   const job = doc.latest_job;
@@ -168,7 +190,7 @@ function renderRows(items) {
       stageCell(job, "text_extraction"),
       stageCell(job, "ocr"),
       stageCell(job, "ai_extraction"),
-      stageCell(job, "validation"),
+      validationCell(doc),
       detailsCell(doc),
       actionsCell(doc),
     ]));

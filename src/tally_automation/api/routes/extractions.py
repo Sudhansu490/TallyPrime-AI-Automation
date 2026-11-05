@@ -5,7 +5,7 @@ Account numbers are masked in every response; full values stay on the server.
 
 from __future__ import annotations
 
-import re
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -18,15 +18,25 @@ from sqlalchemy.orm import Session, selectinload
 from tally_automation.api.deps import SessionDep
 from tally_automation.db.models import (
     BankStatement, BankTransaction, Document, DocumentType, EditableEntity, ExtractionRun, FieldEdit, Invoice,
-    JobStatus,
-    ProcessingJob,
+    InvoiceLineItem, JobStatus, ProcessingJob, ValidationOutcome,
 )
 from tally_automation.db.session import transaction
+from tally_automation.extraction.masking import mask_in, statement_secrets
 from tally_automation.extraction.parsing import ValueType, mask_account_number
 from tally_automation.extraction.records import ENTITY_FIELDS, EditError, apply_edit
 from tally_automation.extraction.schemas import FieldSpec
+from tally_automation.validation.service import validate_document
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["extractions"])
+
+
+def _document_of(entity: Invoice | InvoiceLineItem | BankStatement | BankTransaction) -> int:
+    if isinstance(entity, InvoiceLineItem):
+        return entity.invoice.document_id
+    if isinstance(entity, BankTransaction):
+        return entity.statement.document_id
+    return entity.document_id
 
 _COUNTED = ("missing", "warning", "invalid")
 
@@ -107,10 +117,18 @@ class FieldEditIn(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class EditValidationOut(BaseModel):
+    outcome: ValidationOutcome
+    error_count: int
+    warning_count: int
+
+
 class FieldEditOut(BaseModel):
     entity: EditableEntity
     entity_id: int
     field: FieldOut
+    # Validation re-run after the edit; null if it could not run.
+    validation: EditValidationOut | None
 
 
 class EditRecordOut(BaseModel):
@@ -124,29 +142,6 @@ class EditRecordOut(BaseModel):
 
 
 # ---- Serialisation -------------------------------------------------------------------
-
-def _mask_in(text: str | None, secrets: tuple[str, ...]) -> str | None:
-    """Mask every occurrence of any of the account numbers in free text."""
-    if not text:
-        return text
-    for secret in secrets:
-        digits = re.sub(r"\D", "", secret)
-        if len(digits) < 5:
-            continue
-        # Allow spaces or hyphens between the digits as printed.
-        pattern = r"[\s\-]?".join(map(re.escape, digits))
-        text = re.sub(pattern, mask_account_number(digits) or "", text)
-    return text
-
-
-def account_secrets(fields: dict[str, Any] | None) -> tuple[str, ...]:
-    """Every account number value a statement's fields hold (current and original)."""
-    meta = (fields or {}).get("account_number") or {}
-    candidates = [meta.get("raw"), meta.get("value"), *(meta.get("alternatives") or [])]
-    if meta.get("original"):
-        candidates += [meta["original"].get("raw"), meta["original"].get("value")]
-    return tuple(dict.fromkeys(c for c in candidates if c))
-
 
 def _field_out(spec: FieldSpec, meta: dict[str, Any] | None, secrets: tuple[str, ...] = ()) -> FieldOut:
     """Serialise one field. ``secrets``: account numbers to mask wherever they appear,
@@ -162,10 +157,10 @@ def _field_out(spec: FieldSpec, meta: dict[str, Any] | None, secrets: tuple[str,
                 original[key] = mask_account_number(original.get(key))
     else:
         for key in ("raw", "value"):
-            meta[key] = _mask_in(meta.get(key), secrets)
-    meta["evidence"] = _mask_in(meta.get("evidence"), secrets)
+            meta[key] = mask_in(meta.get(key), secrets)
+    meta["evidence"] = mask_in(meta.get("evidence"), secrets)
     if original:
-        original["evidence"] = _mask_in(original.get("evidence"), secrets)
+        original["evidence"] = mask_in(original.get("evidence"), secrets)
     return FieldOut(
         name=spec.name, label=spec.label, type=spec.value_type.value,
         value=meta.get("value"), raw=meta.get("raw"), status=meta.get("status", "missing"),
@@ -174,11 +169,6 @@ def _field_out(spec: FieldSpec, meta: dict[str, Any] | None, secrets: tuple[str,
         confidence=meta.get("confidence"), alternatives=meta.get("alternatives", []),
         edited_at=meta.get("edited_at"), original=original,
     )
-
-
-def _statement_secrets(statement: BankStatement) -> tuple[str, ...]:
-    extra = (statement.account_number,) if statement.account_number else ()
-    return tuple(dict.fromkeys(account_secrets(statement.fields) + extra))
 
 
 def _fields_out(kind: EditableEntity, fields: dict[str, Any], secrets: tuple[str, ...] = ()) -> list[FieldOut]:
@@ -239,9 +229,9 @@ def get_extraction(document_id: int, session: SessionDep) -> ExtractionOut:
         )
         assert statement is not None
         kind, row_kind, header = EditableEntity.BANK_STATEMENT, EditableEntity.BANK_TRANSACTION, statement
-        secrets = _statement_secrets(statement)
+        secrets = statement_secrets(statement)
         rows = [
-            RowOut(id=t.id, number=t.sequence, row_text=_mask_in(t.row_text, secrets), page=t.page,
+            RowOut(id=t.id, number=t.sequence, row_text=mask_in(t.row_text, secrets), page=t.page,
                    confidence=t.confidence, fields=_fields_out(row_kind, t.fields, secrets))
             for t in statement.transactions
         ]
@@ -282,16 +272,31 @@ def edit_field(
                 tx, entity, entity_id, field_name, body.value, reason=body.reason, client_address=client,
             )
             if isinstance(edited, BankStatement):
-                secrets = _statement_secrets(edited)
+                secrets = statement_secrets(edited)
             elif isinstance(edited, BankTransaction):
-                secrets = _statement_secrets(edited.statement)
+                secrets = statement_secrets(edited.statement)
             else:
                 secrets = ()
+            # Every edit re-runs validation and duplicate detection for the document.
+            # It is plain code; if it fails, the edit is still saved and the
+            # validation can be re-run from the Review page.
+            tx.flush()
+            try:
+                with tx.begin_nested():
+                    result = validate_document(tx, _document_of(edited))
+                    validation = EditValidationOut(
+                        outcome=result.outcome, error_count=result.error_count, warning_count=result.warning_count,
+                    )
+            except Exception:
+                logger.exception("validation after edit failed", extra={"entity": entity.value})
+                validation = None
     except EditError as exc:
         code = {"not_found": 404, "unknown_field": 404, "unchanged": 409}.get(exc.code, 422)
         return JSONResponse(status_code=code, content={"detail": exc.message, "code": exc.code})
     spec = next(s for s in ENTITY_FIELDS[entity] if s.name == field_name)
-    return FieldEditOut(entity=entity, entity_id=entity_id, field=_field_out(spec, meta, secrets))
+    return FieldEditOut(
+        entity=entity, entity_id=entity_id, field=_field_out(spec, meta, secrets), validation=validation,
+    )
 
 
 @router.get("/extractions/{entity}/{entity_id}/edits", response_model=list[EditRecordOut])

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>Duplicate management</h1>
+  <form class="actions" id="filters">
+    <label class="inline-label">Show
+      <select id="filter-status" aria-label="Which matches to show">
+        <option value="open">To review</option>
+        <option value="resolved">Decided</option>
+        <option value="all">All</option>
+      </select>
+    </label>
+    <button type="button" class="btn btn-secondary" id="reload">Reload</button>
+  </form>
+</div>
+
+<div id="page-message" role="status" aria-live="polite"></div>
+
+<section class="card" aria-labelledby="counts-heading">
+  <h2 id="counts-heading">Summary</h2>
+  <dl class="stat-grid" id="counts" hidden>
+    <div class="stat"><dt>To review</dt><dd id="count-open"></dd></div>
+    <div class="stat"><dt>Confirmed duplicates</dt><dd id="count-duplicate"></dd></div>
+    <div class="stat"><dt>Not duplicates</dt><dd id="count-not-duplicate"></dd></div>
+    <div class="stat"><dt>Identical re-uploads</dt><dd id="count-exact"></dd></div>
+  </dl>
+  <p class="small muted">
+    Nothing is rejected automatically. Each possible duplicate shows the evidence field by field;
+    a person decides. “Duplicate” means the <strong>later</strong> upload is the copy: a duplicate invoice is
+    kept out of voucher generation, a duplicate bank transaction is left out of its statement's vouchers.
+    Records that only share a date and an amount are not flagged. Every decision is recorded and can be reopened.
+  </p>
+</section>
+
+<section class="card" aria-labelledby="matches-heading">
+  <h2 id="matches-heading">Possible duplicates</h2>
+  <div id="matches"></div>
+</section>
+
+<section class="card" aria-labelledby="exact-heading">
+  <h2 id="exact-heading">Identical files (same SHA-256)</h2>
+  <p class="small muted">Byte-for-byte identical re-uploads are recorded at upload and never processed again.</p>
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Upload</th><th>Identical to</th><th>SHA-256</th></tr></thead>
+      <tbody id="exact-body"></tbody>
+    </table>
+  </div>
+</section>
+
+<dialog id="decision-dialog" aria-labelledby="decision-title">
+  <form method="dialog" id="decision-form">
+    <h2 id="decision-title">Record decision</h2>
+    <p id="decision-summary"></p>
+    <label class="block-label" for="decision-note">Note <span class="muted small">(optional, kept in the audit trail)</span></label>
+    <input type="text" id="decision-note" autocomplete="off" maxlength="500">
+    <div id="decision-message" role="status" aria-live="polite"></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-secondary" id="decision-cancel">Cancel</button>
+      <button type="submit" class="btn" id="decision-save">Confirm</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}

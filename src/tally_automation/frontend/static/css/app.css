@@ -193,7 +193,7 @@ a.btn { display: inline-block; text-decoration: none; }
 .table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .table th, .table td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
 .table th { font-size: 0.8rem; color: var(--muted); font-weight: 600; white-space: nowrap; }
-.table .filename { max-width: 18rem; overflow-wrap: anywhere; }
+.table .filename { min-width: 9rem; max-width: 18rem; overflow-wrap: anywhere; }
 .table .details { min-width: 16rem; max-width: 28rem; }
 .table progress { width: 7rem; }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 0.75rem; margin-top: 0.75rem; }
@@ -242,6 +242,17 @@ a.btn { display: inline-block; text-decoration: none; }
 .tag-invalid { background: var(--error-bg); color: var(--error-fg); }
 .legend { line-height: 1.9; }
 dialog { max-width: 40rem; width: calc(100% - 2rem); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; }
+/* Validation and duplicates (Phase 5) */
+.check-list { list-style: none; margin: 0; padding: 0; }
+.check { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; padding: 0.45rem 0; border-bottom: 1px solid var(--border); }
+.check-category { min-width: 5.5rem; }
+.check-numbers { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding-left: 0.25rem; }
+.match-group { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.85rem; margin-bottom: 1rem; }
+.match-group h3 { font-size: 1rem; margin: 0 0 0.35rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.match { border-top: 1px solid var(--border); padding-top: 0.6rem; margin-top: 0.6rem; }
+.match-head { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.evidence-table td, .evidence-table th[scope="row"] { overflow-wrap: anywhere; }
+.evidence-table th[scope="row"] { color: var(--text); }
 dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 .field-facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 0.75rem; font-size: 0.9rem; }
 .field-facts dt { color: var(--muted); }

@@ -26,8 +26,23 @@
     <span class="tag tag-warning">Check</span> needs a look ·
     <span class="tag tag-invalid">Invalid</span> cannot be used as is ·
     <span class="muted">—</span> not in the document.
-    Values are shown exactly as transcribed until checked; nothing has been validated for accounting yet (Phase 5).
+    Values are shown exactly as transcribed. Validation results below never change them.
   </p>
+</section>
+
+<section class="card" id="validation-card" hidden aria-labelledby="validation-heading">
+  <div class="section-header">
+    <h2 id="validation-heading">Validation</h2>
+    <button type="button" class="btn btn-secondary btn-small" id="revalidate">Run validation again</button>
+  </div>
+  <div id="validation-message" role="status" aria-live="polite"></div>
+  <div id="validation-status"></div>
+  <div id="validation-duplicates"></div>
+  <div id="validation-problems"></div>
+  <details id="validation-passed-wrap">
+    <summary class="small" id="validation-passed-summary">Checks that passed</summary>
+    <ul class="check-list" id="validation-passed"></ul>
+  </details>
 </section>
 
 <section class="card" id="header-card" hidden aria-labelledby="header-heading">

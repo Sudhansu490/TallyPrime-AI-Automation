@@ -23,6 +23,16 @@ from tally_automation.db.models.extraction import (
     InvoiceLineItem,
 )
 from tally_automation.db.models.user import AppUser, UserRole
+from tally_automation.db.models.validation import (
+    DuplicateKind,
+    DuplicateMatch,
+    DuplicateReview,
+    MatchStatus,
+    MatchStrength,
+    ReviewDecision,
+    ValidationOutcome,
+    ValidationResult,
+)
 
 __all__ = [
     "AppUser",
@@ -38,11 +48,19 @@ __all__ = [
     "DocumentPage",
     "DocumentStatus",
     "DocumentType",
+    "DuplicateKind",
+    "DuplicateMatch",
+    "DuplicateReview",
     "JobStatus",
+    "MatchStatus",
+    "MatchStrength",
     "MediaType",
     "ProcessingJob",
     "ProcessingStage",
+    "ReviewDecision",
     "StageStatus",
     "TextSource",
     "UserRole",
+    "ValidationOutcome",
+    "ValidationResult",
 ]
