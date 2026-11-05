@@ -10,6 +10,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from tally_automation.config import Settings
+from tally_automation.documents.service import DocumentIngestor
 
 
 def get_settings(request: Request) -> Settings:
@@ -28,6 +29,11 @@ def get_session(request: Request) -> Iterator[Session]:
         session.close()
 
 
+def get_ingestor(request: Request) -> DocumentIngestor:
+    return request.app.state.ingestor
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+IngestorDep = Annotated[DocumentIngestor, Depends(get_ingestor)]
 EngineDep = Annotated[Engine, Depends(get_engine)]
 SessionDep = Annotated[Session, Depends(get_session)]

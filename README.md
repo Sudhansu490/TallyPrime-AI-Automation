@@ -3,8 +3,10 @@
 AI-assisted processing of purchase invoices and bank statements into
 TallyPrime vouchers, with mandatory human review and approval.
 
-**Status: Phase 1 (foundation).** No document processing, AI extraction or
-Tally communication exists yet. Nothing in this codebase can write to TallyPrime.
+**Status: Phase 2 (document upload and processing foundation).** Documents can be
+uploaded, validated, de-duplicated (exact file) and queued. Text extraction, OCR, AI
+extraction and Tally communication do not exist yet, so queued documents stay queued.
+Nothing in this codebase can write to TallyPrime.
 
 ## Principles
 
@@ -46,6 +48,10 @@ src/tally_automation/
   logging_config.py  JSON logs with redaction of sensitive fields
   security.py        password hashing (stdlib scrypt)
   api/               app factory, dependencies, middleware, JSON routes
+  documents/
+    validation.py    extension, magic-byte and structural (PyMuPDF / Pillow) checks
+    storage.py       content-addressed, write-once storage of originals
+    service.py       ingestion: validate → hash → duplicate check → store → queue
   frontend/
     routes.py        HTML page routes and navigation
     templates/       Jinja2 layout and page shells
@@ -57,7 +63,7 @@ tests/               pytest suite (synthetic data only)
 data/                runtime data: database, uploads, logs (gitignored)
 ```
 
-Modules for documents, OCR, extraction, validation, duplicates, Tally and
+Modules for text extraction, OCR, AI extraction, validation, duplicates, Tally and
 authentication are added in their own phases.
 
 ### Frontend rules
@@ -67,6 +73,42 @@ authentication are added in their own phases.
   `textContent` only. `innerHTML`, `eval`, inline scripts, inline styles and
   `localStorage`/`sessionStorage` are banned. `tests/test_frontend.py` enforces this.
 - Business logic and validation live on the backend. The frontend only displays data.
+
+## Document intake (Phase 2)
+
+Pipeline steps 1–4 run synchronously during upload (`POST /api/v1/documents`, one file per request):
+
+1. **Name and type.** The filename is reduced to a display-only base name. The extension
+   must be allowed for the document type (invoices: `.pdf .jpg .jpeg .png`; bank statements: `.pdf`).
+2. **Size.** `Content-Length` is checked before the body is read, and the size limit is enforced
+   again while streaming. Chunked uploads without a length are refused (411).
+3. **SHA-256** is computed while streaming to a private temp file.
+4. **Content.** Magic bytes must match the extension. PDFs must open in PyMuPDF, must not be
+   encrypted, and must have between 1 and `MAX_PDF_PAGES` pages. Images must decode fully and stay
+   under `MAX_IMAGE_MEGAPIXELS` (decompression-bomb guard).
+5. **Exact duplicate (Level 1).** If the SHA-256 is already stored, the upload is recorded as a
+   `duplicate` document that points at the original, with the evidence, and is **not** queued.
+   Otherwise the file is stored and a `queued` processing job is created.
+
+Rejected uploads are not stored. Responses carry a stable `code` and a readable `detail`.
+
+**Storage.** Originals live in `data/uploads/originals/<aa>/<sha256>.<ext>`. Names come only from the
+hash (no path traversal), files are hard-linked into place (never overwritten) and made read-only.
+
+**Integrity.** The database enforces a unique SHA-256 per stored file, at most one non-duplicate
+document per file (partial unique index), "duplicate ⇔ has an original", and "failed job ⇔ has an
+error message". Concurrent identical uploads therefore yield exactly one original.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/documents/upload-limits` | Allowed extensions and size limits (used by the Upload page) |
+| `POST /api/v1/documents` | Upload one file (`multipart/form-data`: `file`, `document_type`) |
+| `GET /api/v1/documents?status=&document_type=&limit=&offset=` | List, newest first, with the latest job's stage statuses |
+| `GET /api/v1/documents/{id}` | One document |
+| `GET /api/v1/documents/stats` | Dashboard counts (`pending_approvals` is `null` until Phase 8) |
+
+**Cross-site protection.** POST/PUT/PATCH/DELETE requests are rejected (403) when the browser's
+`Origin` or `Sec-Fetch-Site` header shows another site. Per-session CSRF tokens arrive with login in Phase 9.
 
 ## Setup (Windows 11, Python 3.12.10)
 
@@ -154,8 +196,10 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | `paddlepaddle 2.6.2` needs `protobuf<=3.20.2` | A newer protobuf breaks Paddle import | `constraints.txt` pins 3.20.2 |
 | `opencv-python`, `opencv-contrib-python` and `opencv-python-headless` are all installed | They overwrite the same `cv2` module | Reduce to one in Phase 3 |
 | Streamlit 1.66 and pyarrow 26 are still installed in `tally_env` (from the earlier UI) | Unused; pyarrow 26 needs NumPy ≥2 | No longer a project dependency. Optional: `pip uninstall streamlit pyarrow` |
+| No processing worker yet | Accepted documents stay `queued` | The worker arrives in Phase 3 with its first real stage (text extraction) |
+| No login yet | Anyone who can reach the app can upload | Keep `BIND_HOSTS=127.0.0.1` until Phase 9 |
 | The tailnet contains only Computer A | Computer B and the Tally host cannot connect yet | Join both devices to tailnet `shivam-proteco-1997.github` |
-| SQLite `DateTime(timezone=True)` | SQLite stores no offset | Values are written in UTC; treat them as UTC |
+| SQLite stores datetimes without an offset | Naive values would reach the browser and be misread as local time | `UtcDateTime` column type stores UTC, always returns UTC-aware values and refuses naive input |
 
 ## TallyPrime connectivity prerequisites (Phase 6)
 
@@ -168,7 +212,7 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 
 ## Phases
 
-1. Foundation ✅ · 2. Upload & processing foundation · 3. PDF text & OCR ·
+1. Foundation ✅ · 2. Upload & processing foundation ✅ · 3. PDF text & OCR ·
 4. AI extraction · 5. Duplicates & accounting validation · 6. Tally read-only ·
 7. Voucher generation · 8. Approval & controlled import · 9. Dashboard,
 security & networking · 10. End-to-end testing & deployment

@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>Upload documents</h1>
+  <a class="btn btn-secondary" href="/processing">View processing status</a>
+</div>
+
+<div id="limits-message" role="status" aria-live="polite"></div>
+
+<section class="card" aria-labelledby="choose-heading">
+  <h2 id="choose-heading">1. Document type</h2>
+  <fieldset class="radio-group" id="type-group">
+    <legend class="visually-hidden">Document type</legend>
+    <label><input type="radio" name="document_type" value="purchase_invoice" checked> Purchase invoice</label>
+    <label><input type="radio" name="document_type" value="bank_statement"> Bank statement</label>
+  </fieldset>
+  <p class="muted" id="type-hint"></p>
+</section>
+
+<section class="card" aria-labelledby="files-heading">
+  <h2 id="files-heading">2. Files</h2>
+  <label class="dropzone" id="dropzone" for="file-input">
+    <span class="dropzone-title">Drop files here or click to choose</span>
+    <span class="muted" id="dropzone-hint"></span>
+    <input type="file" id="file-input" multiple class="visually-hidden">
+  </label>
+  <p class="muted small">
+    Files are checked here first for type and size; the server validates every file again
+    (content, size, readability) before accepting it.
+  </p>
+</section>
+
+<section class="card" aria-labelledby="queue-heading">
+  <div class="section-header">
+    <h2 id="queue-heading">3. Upload queue</h2>
+    <div class="actions">
+      <button type="button" class="btn btn-secondary" id="clear-queue" disabled>Clear finished</button>
+      <button type="button" class="btn" id="start-upload" disabled>Upload</button>
+    </div>
+  </div>
+  <div id="queue-message" role="status" aria-live="polite"></div>
+  <p class="muted" id="queue-empty">No files selected.</p>
+  <div class="table-wrap" id="queue-table-wrap" hidden>
+    <table class="table">
+      <thead>
+        <tr><th>File</th><th>Type</th><th>Size</th><th>Progress</th><th>Result</th></tr>
+      </thead>
+      <tbody id="queue-body"></tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

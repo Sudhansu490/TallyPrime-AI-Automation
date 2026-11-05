@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>Document processing</h1>
+  <div class="actions">
+    <span class="muted small" id="refresh-info"></span>
+    <button type="button" class="btn btn-secondary" id="refresh">Refresh</button>
+  </div>
+</div>
+
+<p class="alert alert-info">
+  Processing stages (text extraction, OCR, AI extraction, validation) are added from Phase 3.
+  Until then, accepted documents stay <strong>Queued</strong>.
+</p>
+
+<section class="card">
+  <form class="filters" id="filters">
+    <label>Status
+      <select name="status" id="filter-status">
+        <option value="">All</option>
+        <option value="queued">Queued</option>
+        <option value="processing">Processing</option>
+        <option value="processed">Processed</option>
+        <option value="failed">Failed</option>
+        <option value="duplicate">Duplicate</option>
+      </select>
+    </label>
+    <label>Type
+      <select name="document_type" id="filter-type">
+        <option value="">All</option>
+        <option value="purchase_invoice">Purchase invoice</option>
+        <option value="bank_statement">Bank statement</option>
+      </select>
+    </label>
+  </form>
+
+  <div id="list-message" role="status" aria-live="polite"></div>
+  <p class="muted" id="list-empty" hidden>No documents match.</p>
+  <div class="table-wrap" id="list-wrap" hidden>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>#</th><th>File</th><th>Type</th><th>Uploaded</th><th>Status</th>
+          <th>Text extraction</th><th>OCR</th><th>AI extraction</th><th>Validation</th><th>Details</th>
+        </tr>
+      </thead>
+      <tbody id="list-body"></tbody>
+    </table>
+  </div>
+  <div class="pager">
+    <button type="button" class="btn btn-secondary" id="prev-page" disabled>Previous</button>
+    <span class="muted small" id="page-info"></span>
+    <button type="button" class="btn btn-secondary" id="next-page" disabled>Next</button>
+  </div>
+</section>
+{% endblock %}

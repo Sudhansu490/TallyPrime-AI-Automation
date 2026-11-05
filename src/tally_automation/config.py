@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     database_url: str = "sqlite:///data/tally_automation.db"
     max_upload_size_mb: int = Field(default=20, gt=0, le=100)
+    max_pdf_pages: int = Field(default=200, gt=0, le=2000)
+    # Guards against decompression bombs (tiny file, enormous bitmap).
+    max_image_megapixels: int = Field(default=50, gt=0, le=200)
 
     # Interfaces the single app process listens on. Each must be loopback or a
     # Tailscale address; see `tally_automation.server.validate_bind_host`.

@@ -54,6 +54,31 @@ export function setBadge(node, state, text) {
   node.replaceChildren(el("span", { className: `badge badge-${state}`, text }));
 }
 
+/** Short labels and badge colours for document, job and stage statuses. */
+const STATUS_DISPLAY = {
+  queued: ["Queued", "neutral"],
+  processing: ["Processing", "info"],
+  running: ["Running", "info"],
+  processed: ["Processed", "ok"],
+  succeeded: ["Succeeded", "ok"],
+  failed: ["Failed", "error"],
+  duplicate: ["Duplicate", "warning"],
+  cancelled: ["Cancelled", "neutral"],
+  pending: ["Pending", "neutral"],
+  skipped: ["Skipped", "neutral"],
+};
+
+/** A badge element for a backend status value. Unknown values are shown verbatim. */
+export function statusBadge(status) {
+  const [label, state] = STATUS_DISPLAY[status] ?? [String(status), "neutral"];
+  return el("span", { className: `badge badge-${state}`, text: label });
+}
+
+export const DOCUMENT_TYPE_LABELS = {
+  purchase_invoice: "Purchase invoice",
+  bank_statement: "Bank statement",
+};
+
 // ---- Formatting -----------------------------------------------------------
 
 const inrFormatter = new Intl.NumberFormat("en-IN", {
@@ -117,4 +142,13 @@ export function maskAccount(value) {
   const text = String(value).replace(/\s+/g, "");
   if (text.length <= 4) return "X".repeat(text.length);
   return "X".repeat(text.length - 4) + text.slice(-4);
+}
+
+/** Format a byte count as "512 B", "1.4 MB". */
+export function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined || Number.isNaN(Number(bytes))) return EMPTY;
+  const n = Number(bytes);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }

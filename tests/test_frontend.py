@@ -49,17 +49,36 @@ def test_dashboard_page_renders(client: TestClient) -> None:
     assert f"v{__version__}" in html
 
 
-def test_dashboard_loads_only_local_module_scripts_and_styles(client: TestClient) -> None:
-    page = parse(client.get("/").text)
+PAGES = [
+    ("/", "Dashboard", "pages/dashboard.js"),
+    ("/upload", "Upload documents", "pages/upload.js"),
+    ("/processing", "Document processing", "pages/processing.js"),
+]
+
+
+@pytest.mark.parametrize(("path", "title", "script"), PAGES)
+def test_pages_load_only_local_module_scripts_and_styles(
+    client: TestClient, path: str, title: str, script: str
+) -> None:
+    response = client.get(path)
+    assert response.status_code == 200
+    assert f"<title>{title} · Tally Automation</title>" in response.text
+    page = parse(response.text)
     assert page.inline_script_text == []
     scripts = [attrs for tag, attrs in page.tags if tag == "script"]
-    assert scripts == [{"type": "module", "src": f"/static/js/pages/dashboard.js?v={__version__}"}]
+    assert scripts == [{"type": "module", "src": f"/static/js/{script}?v={__version__}"}]
     stylesheets = [attrs["href"] for tag, attrs in page.tags if tag == "link" and attrs.get("rel") == "stylesheet"]
     assert stylesheets == [f"/static/css/app.css?v={__version__}"]
     # No inline styles or inline event handlers.
     for _tag, attrs in page.tags:
         assert "style" not in attrs
         assert not any(name.startswith("on") for name in attrs)
+    assert client.get(f"/static/js/{script}").status_code == 200
+
+
+@pytest.mark.parametrize(("path", "title", "script"), PAGES)
+def test_current_page_highlighted(client: TestClient, path: str, title: str, script: str) -> None:
+    assert f'href="{path}" aria-current="page"' in client.get(path).text
 
 
 def test_navigation_marks_current_page_and_unbuilt_pages(client: TestClient) -> None:
@@ -86,6 +105,9 @@ def test_unbuilt_pages_are_not_served(client: TestClient) -> None:
         ("/static/js/api.js", "text/javascript"),
         ("/static/js/ui.js", "text/javascript"),
         ("/static/js/pages/dashboard.js", "text/javascript"),
+        ("/static/js/pages/upload.js", "text/javascript"),
+        ("/static/js/pages/processing.js", "text/javascript"),
+        ("/static/favicon.svg", "image/svg+xml"),
     ],
 )
 def test_static_assets_are_served(client: TestClient, path: str, content_type: str) -> None:

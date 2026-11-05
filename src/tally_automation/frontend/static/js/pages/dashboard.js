@@ -54,5 +54,30 @@ async function loadHealth() {
   }
 }
 
-document.getElementById("refresh-health").addEventListener("click", loadHealth);
-loadHealth();
+async function loadStats() {
+  const message = document.getElementById("stats-message");
+  const grid = document.getElementById("stats-grid");
+  try {
+    const stats = await api.get("/documents/stats");
+    const show = (id, value) => { document.getElementById(id).textContent = value === null ? "—" : String(value); };
+    show("stat-total", stats.total);
+    show("stat-queued", stats.queued + stats.processing);
+    show("stat-processed", stats.processed);
+    show("stat-failed", stats.failed);
+    show("stat-duplicates", stats.duplicates);
+    show("stat-approvals", stats.pending_approvals); // null until Phase 8: shown as "—", never as 0
+    clear(message);
+    grid.hidden = false;
+  } catch (error) {
+    grid.hidden = true;
+    showError(message, error);
+  }
+}
+
+function refreshAll() {
+  loadHealth();
+  loadStats();
+}
+
+document.getElementById("refresh-health").addEventListener("click", refreshAll);
+refreshAll();

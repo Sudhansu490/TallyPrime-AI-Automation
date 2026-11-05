@@ -8,7 +8,7 @@ from alembic import context
 
 from tally_automation.config import get_settings
 from tally_automation.db import models  # noqa: F401  (registers all tables)
-from tally_automation.db.base import Base
+from tally_automation.db.base import Base, UtcDateTime
 from tally_automation.db.session import create_db_engine
 
 config = context.config
@@ -16,6 +16,13 @@ if config.config_file_name is not None and config.attributes.get("configure_logg
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+
+def _render_item(type_: str, obj: object, autogen_context: object) -> str | bool:
+    # UtcDateTime is a Python-side wrapper; the column itself is a plain DateTime.
+    if type_ == "type" and isinstance(obj, UtcDateTime):
+        return "sa.DateTime(timezone=True)"
+    return False
 
 
 def _database_url() -> str:
@@ -29,6 +36,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         render_as_batch=True,
+        render_item=_render_item,
         dialect_opts={"paramstyle": "named"},
     )
     with context.begin_transaction():
@@ -48,6 +56,7 @@ def run_migrations_online() -> None:
                 # SQLite cannot ALTER most constraints; batch mode recreates tables.
                 render_as_batch=True,
                 compare_type=True,
+                render_item=_render_item,
             )
             with context.begin_transaction():
                 context.run_migrations()

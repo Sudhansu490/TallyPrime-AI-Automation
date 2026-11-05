@@ -5,10 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, String
+from sqlalchemy import Enum, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from tally_automation.db.base import Base, TimestampMixin
+from tally_automation.db.base import Base, TimestampMixin, UtcDateTime
 
 
 class UserRole(StrEnum):
@@ -31,7 +31,7 @@ class AppUser(TimestampMixin, Base):
         default=UserRole.VIEWER,
     )
     is_active: Mapped[bool] = mapped_column(default=True)
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_login_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
 
     def __repr__(self) -> str:
         return f"AppUser(id={self.id!r}, username={self.username!r}, role={self.role.value!r})"

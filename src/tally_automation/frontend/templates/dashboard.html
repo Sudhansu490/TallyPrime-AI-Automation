@@ -2,7 +2,7 @@
 {% block content %}
 <div class="page-header">
   <h1>Dashboard</h1>
-  <button type="button" class="btn" id="refresh-health">Refresh status</button>
+  <button type="button" class="btn" id="refresh-health">Refresh</button>
 </div>
 
 <section class="card" aria-labelledby="system-status-heading">
@@ -19,9 +19,16 @@
 
 <section class="card" aria-labelledby="documents-heading">
   <h2 id="documents-heading">Documents</h2>
-  <p class="muted">
-    Document counts (uploaded, processed, failed, duplicates, pending approval)
-    appear here once document upload is built in Phase 2.
-  </p>
+  <div id="stats-message" role="status" aria-live="polite"></div>
+  <dl class="stat-grid" id="stats-grid" hidden>
+    <div class="stat"><dt>Total uploaded</dt><dd id="stat-total"></dd></div>
+    <div class="stat"><dt>Queued</dt><dd id="stat-queued"></dd></div>
+    <div class="stat"><dt>Processed</dt><dd id="stat-processed"></dd></div>
+    <div class="stat"><dt>Failed</dt><dd id="stat-failed"></dd></div>
+    <div class="stat"><dt>Duplicates</dt><dd id="stat-duplicates"></dd></div>
+    <div class="stat"><dt>Pending approvals</dt><dd id="stat-approvals"></dd></div>
+  </dl>
+  <p class="muted small">Voucher approvals become available in Phase 8.</p>
+  <p><a href="/upload">Upload documents</a> · <a href="/processing">View processing status</a></p>
 </section>
 {% endblock %}

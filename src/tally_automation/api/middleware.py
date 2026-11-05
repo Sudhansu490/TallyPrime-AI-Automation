@@ -1,10 +1,14 @@
-"""HTTP security headers applied to every response."""
+"""HTTP security middleware: response headers and cross-site request rejection."""
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
+
+UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # No inline scripts or styles, no third-party origins. The frontend is entirely
 # same-origin, so 'self' covers scripts, styles, images and fetch() calls.
@@ -40,6 +44,38 @@ STATIC_HEADERS = {
     "Cross-Origin-Resource-Policy": "same-origin",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
 }
+
+
+def is_cross_site(request: Request) -> bool:
+    """True if a browser tells us an unsafe request came from another origin.
+
+    Uses Fetch Metadata (Sec-Fetch-Site) and the Origin header. Non-browser
+    clients send neither and are not affected. This blocks a malicious web page
+    from submitting forms or fetch() calls to this app; per-session CSRF tokens
+    are added with authentication in Phase 9.
+    """
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site not in ("same-origin", "none"):
+        return True
+    origin = request.headers.get("origin")
+    if origin is None:
+        return False
+    if origin == "null":
+        return True
+    return urlsplit(origin).netloc.lower() != request.headers.get("host", "").lower()
+
+
+def install_origin_check(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def reject_cross_site(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if request.method in UNSAFE_METHODS and is_cross_site(request):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Cross-site request rejected.", "code": "cross_site_request"},
+            )
+        return await call_next(request)
 
 
 def install_security_headers(app: FastAPI, *, docs_path: str | None) -> None:

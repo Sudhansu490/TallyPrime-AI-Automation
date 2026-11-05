@@ -86,4 +86,43 @@ export async function apiRequest(path, { method = "GET", body, timeoutMs = DEFAU
 
 export const api = {
   get: (path, options) => apiRequest(path, { ...options, method: "GET" }),
+  post: (path, body, options) => apiRequest(path, { ...options, method: "POST", body }),
 };
+
+/**
+ * Upload multipart form data with progress reporting.
+ * fetch() cannot report upload progress, so this uses XMLHttpRequest.
+ * @param {string} path  Path below /api/v1.
+ * @param {FormData} formData
+ * @param {{onProgress?: (fraction: number) => void, timeoutMs?: number}} [options]
+ * @returns {Promise<unknown>} Parsed JSON body.
+ */
+export function uploadForm(path, formData, { onProgress, timeoutMs = 300000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_PREFIX}${path}`);
+    xhr.responseType = "json";
+    xhr.timeout = timeoutMs;
+    xhr.setRequestHeader("Accept", "application/json");
+
+    if (onProgress) {
+      xhr.upload.addEventListener("progress", (event) => {
+        if (event.lengthComputable) onProgress(event.loaded / event.total);
+      });
+    }
+    xhr.addEventListener("load", () => {
+      const data = xhr.response;
+      if (xhr.status >= 200 && xhr.status < 300 && data !== null) {
+        resolve(data);
+        return;
+      }
+      const detail = describeDetail(data);
+      const message = detail || `Upload failed (HTTP ${xhr.status}).`;
+      reject(new ApiError(message, { status: xhr.status, body: data }));
+    });
+    xhr.addEventListener("error", () => reject(new ApiError("Could not reach the server. Check the network connection.")));
+    xhr.addEventListener("timeout", () => reject(new ApiError("The upload timed out.")));
+    xhr.addEventListener("abort", () => reject(new ApiError("The upload was cancelled.")));
+    xhr.send(formData);
+  });
+}

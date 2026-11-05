@@ -43,8 +43,8 @@ class NavItem:
 # Pages that do not exist yet are shown disabled, labelled with their phase.
 NAV_ITEMS: tuple[NavItem, ...] = (
     NavItem("Dashboard", "/", 1, True),
-    NavItem("Upload", "/upload", 2, False),
-    NavItem("Processing", "/processing", 2, False),
+    NavItem("Upload", "/upload", 2, True),
+    NavItem("Processing", "/processing", 2, True),
     NavItem("Review", "/review", 4, False),
     NavItem("Duplicates", "/duplicates", 5, False),
     NavItem("TallyPrime", "/tally", 6, False),
@@ -71,3 +71,13 @@ def _render(request: Request, template: str, *, title: str, page_script: str) ->
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     return _render(request, "dashboard.html", title="Dashboard", page_script="pages/dashboard.js")
+
+
+@router.get("/upload", response_class=HTMLResponse)
+def upload(request: Request) -> HTMLResponse:
+    return _render(request, "upload.html", title="Upload documents", page_script="pages/upload.js")
+
+
+@router.get("/processing", response_class=HTMLResponse)
+def processing(request: Request) -> HTMLResponse:
+    return _render(request, "processing.html", title="Document processing", page_script="pages/processing.js")
