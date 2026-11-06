@@ -173,7 +173,10 @@ function renderValidation(v) {
   ]));
   const e = v.eligibility;
   status.append(e.eligible
-    ? el("p", { className: "alert alert-success", text: "Eligible for voucher generation (Phase 7), subject to approval." })
+    ? el("p", { className: "alert alert-success" }, [
+      el("span", { text: "Eligible for voucher generation. " }),
+      el("a", { text: "Generate TallyPrime vouchers", attrs: { href: `/generate?document=${v.document_id}` } }),
+    ])
     : el("div", { className: "alert alert-warning" }, [
       el("strong", { text: "Not yet eligible for voucher generation:" }),
       el("ul", {}, e.reasons.map((r) => el("li", { text: r }))),

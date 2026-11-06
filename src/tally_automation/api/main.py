@@ -20,7 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from tally_automation import __version__
 from tally_automation.api.middleware import install_origin_check, install_security_headers
-from tally_automation.api.routes import documents, extractions, health, tally, validation
+from tally_automation.api.routes import documents, extractions, health, tally, validation, vouchers
 from tally_automation.config import Environment, Settings, get_settings
 from tally_automation.db.session import create_db_engine, create_session_factory
 from tally_automation.documents.service import DocumentIngestor
@@ -99,6 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(extractions.router, prefix="/api/v1")
     app.include_router(validation.router, prefix="/api/v1")
     app.include_router(tally.router, prefix="/api/v1")
+    app.include_router(vouchers.router, prefix="/api/v1")
     app.include_router(frontend_routes.router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app

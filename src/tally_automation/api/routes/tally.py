@@ -89,6 +89,7 @@ class GroupOut(BaseModel):
 
 
 class LedgerOut(BaseModel):
+    guid: str
     name: str
     aliases: list[str]
     parent: str | None
@@ -252,7 +253,7 @@ def tally_ledgers(
     ).all()
     return LedgerList(
         items=[LedgerOut(
-            name=l.name, aliases=l.aliases, parent=l.parent, primary_group=l.primary_group, gstin=l.gstin,
+            guid=l.guid, name=l.name, aliases=l.aliases, parent=l.parent, primary_group=l.primary_group, gstin=l.gstin,
             gstin_valid=l.gstin_valid, gst_registration_type=l.gst_registration_type, state=l.state,
             tax_type=l.tax_type, gst_duty_head=l.gst_duty_head, tax_rate=l.tax_rate,
             bank_account_number=mask_account_number(l.bank_account_number), ifsc=l.ifsc, is_bill_wise=l.is_bill_wise,

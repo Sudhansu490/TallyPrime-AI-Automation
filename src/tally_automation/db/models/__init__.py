@@ -41,6 +41,14 @@ from tally_automation.db.models.validation import (
     ValidationOutcome,
     ValidationResult,
 )
+from tally_automation.db.models.voucher import (
+    GeneratedVoucher,
+    MappingMemory,
+    MappingPurpose,
+    VoucherKind,
+    VoucherSource,
+    VoucherStatus,
+)
 
 __all__ = [
     "AppUser",
@@ -49,6 +57,7 @@ __all__ = [
     "EditableEntity",
     "ExtractionRun",
     "FieldEdit",
+    "GeneratedVoucher",
     "Invoice",
     "InvoiceLineItem",
     "Document",
@@ -60,6 +69,8 @@ __all__ = [
     "DuplicateMatch",
     "DuplicateReview",
     "JobStatus",
+    "MappingMemory",
+    "MappingPurpose",
     "MatchStatus",
     "MatchStrength",
     "MediaType",
@@ -77,4 +88,7 @@ __all__ = [
     "UserRole",
     "ValidationOutcome",
     "ValidationResult",
+    "VoucherKind",
+    "VoucherSource",
+    "VoucherStatus",
 ]

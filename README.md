@@ -3,13 +3,13 @@
 AI-assisted processing of purchase invoices and bank statements into
 TallyPrime vouchers, with mandatory human review and approval.
 
-**Status: Phase 6 (TallyPrime read-only).** Documents are uploaded, validated,
+**Status: Phase 7 (voucher generation).** Documents are uploaded, validated,
 de-duplicated (exact file), and processed by a background worker: embedded PDF text, OCR
 only where needed, structured extraction by an LLM (Groq), then accounting validation and
 business-level duplicate detection. Reviewers correct values on the Review page and decide
 possible duplicates on the Duplicates page (both audited). The backend reads companies,
-groups, ledgers and voucher types from TallyPrime. Nothing in this codebase can write to
-TallyPrime.
+groups, ledgers and voucher types from TallyPrime, and builds and checks TallyPrime voucher
+XML with ledgers a reviewer chooses. Nothing in this codebase can write to TallyPrime yet.
 
 ## Principles
 
@@ -84,6 +84,11 @@ src/tally_automation/
     client.py        HTTP client: host rules, timeouts, size limit, companies and masters
     masters.py       parsing of companies, groups, ledgers, voucher types; primary groups
     service.py       connection check, snapshot retrieval, interrupted-run recovery
+  vouchers/
+    drafts.py        voucher entries from reviewed values and chosen ledgers (no derived amounts)
+    xml.py           TallyPrime import XML rendering and independent structural verification
+    compat.py        TallyPrime compatibility checks against the retrieved masters
+    service.py       suggestions, generation, superseding, mapping memory, staleness
   network.py         Tailscale address ranges (bind addresses and TallyPrime host)
   frontend/
     routes.py        HTML page routes and navigation
@@ -276,7 +281,7 @@ reports what it calculated, what was printed and the difference, and a person de
 values appear only in the check results, tagged *Calculated*; they are never written into the
 extracted fields.
 
-**Two categories** (the spec's third, TallyPrime compatibility, comes with Phase 7):
+**Two categories** (the spec's third, TallyPrime compatibility, is checked per voucher in Phase 7):
 
 * *Extraction*: invalid or unreadable values, missing required fields, unresolved conflicts
   between pages (errors); low confidence and parser warnings (warnings).
@@ -404,6 +409,77 @@ numbers.
 * When TallyPrime is closed, port 9000 refuses connections while the license server on 9999
   keeps answering; the status page reports *Unreachable* with the reason.
 
+## Voucher generation and XML validation (Phase 7)
+
+For an **eligible** document (validation passed, duplicates reviewed), the *Generate* page
+builds TallyPrime vouchers with ledgers a reviewer chooses, renders the TallyPrime import
+XML, checks it, and stores it. **Nothing is sent to TallyPrime**: there is no import code
+in this phase, the read-only client refuses any import body (tested against the generated
+XML), and importing will be a separate, approved operation (Phase 8).
+
+**Voucher forms** (ledgers only; no stock items, as confirmed for this company):
+
+| Source | Voucher | Entries |
+|---|---|---|
+| Purchase invoice | Purchase (accounting invoice) | Supplier **Cr** grand total (bill-wise: *New Ref* = supplier invoice no.) · Purchase ledger(s) **Dr** taxable value · CGST/SGST/IGST/Cess ledgers **Dr** printed totals · Round-off **Dr/Cr** |
+| Bank debit (money out) | Payment | Other ledger **Dr** · Bank **Cr** |
+| Bank credit (money in) | Receipt | Bank **Dr** · Other ledger **Cr** |
+| Either, other ledger is a bank or cash ledger | Contra | as above |
+
+The taxable value is split across purchase ledgers by GST rate only when every line item
+shows a taxable amount and a rate and the lines add up *exactly* to the printed total;
+otherwise it goes to one purchase ledger (and the page says why). Amounts are never
+derived: if taxable value + taxes + round-off differs from the grand total, no voucher is
+built. Payments to bill-wise parties are recorded *On Account* (adjust against bills in
+TallyPrime). Supplier invoice number and date go to *Reference* and *Reference date*;
+voucher numbers are left to TallyPrime's numbering. Each narration carries a marker such as
+`TA-1A2B3C4D5E-INV` (from the document file's SHA-256 and the record), so Phase 8 can find
+an imported voucher in TallyPrime and refuse to post it twice.
+
+**Ledger choice.** The page shows *suggestions*, never decisions: ledgers with the same
+GSTIN as the invoice, the bank ledger with the statement's account number, GST ledgers
+with the matching duty head (and rate), and the ledger chosen last time for the same
+supplier, rate, head, bank account or transaction description. No AI is involved. Only an
+unambiguous suggestion is pre-selected; the reviewer submits every ledger, and the backend
+re-checks each one against the retrieved masters.
+
+**Checks** (category *TallyPrime*, stored with each voucher; errors block it):
+
+* Every ledger and the voucher type exist in the retrieved masters; the voucher type is
+  active and of the right base type (Purchase, Payment, Receipt, Contra).
+* Each ledger fits its role: party not a tax/bank/purchase ledger (warning if not under
+  Sundry Creditors); purchase ledger not a tax/bank/party ledger; tax amounts on GST duty
+  ledgers of the same head (warning if the ledger's rate differs from the invoice's); bank
+  ledger under a bank group, with the statement's account number when both are known; no
+  ledger in two roles.
+* The supplier ledger's GSTIN equals the invoice GSTIN; CGST/SGST versus IGST fits the
+  supplier's state (from the GSTIN) and the company's state.
+* The date lies inside the company's books and not in the future; debits equal credits.
+* The XML is parsed back independently: one voucher, `ACTION="Create"`, the chosen company
+  and voucher type, valid dates and two-decimal amounts, signs that agree with debit/credit,
+  bill allocations equal to their entries, a zero sum, and exactly the draft's entries.
+
+A voucher is **ready** (may go to approval in Phase 8) or **blocked**. Generating again
+supersedes the previous voucher for that source (one current voucher per source, enforced
+by a partial unique index). A voucher becomes **out of date** when the document is edited or
+extracted again, the masters are retrieved again, or the document is no longer eligible;
+Phase 8 will refuse to approve it until it is generated again.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/documents/{id}/voucher-setup` | Eligibility, what the voucher(s) need, ledger suggestions (`?company=` GUID) |
+| `POST /api/v1/documents/{id}/vouchers` | Generate with the submitted ledgers (`invoice` or `statement` choices) |
+| `GET /api/v1/documents/{id}/vouchers` | The document's current vouchers (`?include_superseded=true` for history) |
+| `GET /api/v1/vouchers` | Current vouchers of all documents (`?status=ready`, `blocked` or `superseded`) |
+| `GET /api/v1/vouchers/{id}` | One voucher with its import XML (bank account numbers masked) |
+
+**Observed with the real masters (2026-11-06):** the company's Purchase, Payment, Receipt and
+Contra voucher types use no voucher numbering; there are two CGST 9% ledgers and a generic
+CGST ledger, so the CGST suggestion is ambiguous and a person must choose; 12 GSTINs are shared
+by more than one ledger, so a same-GSTIN suggestion can list several parties; some bank
+ledgers carry the account number in the ledger *name* (not in the bank details), so the bank
+account check reports "could not compare" for them, and the name shows the number on screen.
+
 ## Setup (Windows 11, Python 3.12.10)
 
 The project uses the existing `tally_env` virtual environment.
@@ -501,6 +577,11 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | TallyPrime client has no write path at all in Phase 6 | Read-only is enforced by construction and by a guard on every request body, not by a setting |
 | Masters stored as a per-company snapshot, keyed by Tally GUID | Mapping (Phase 7) needs them offline and consistent; GUIDs survive renames |
 | Inline TDL collections instead of built-in reports | Exactly the fields needed, nothing more; no TDL is installed in TallyPrime |
+| Purchase vouchers in accounting-invoice form (ledgers only) | The company records purchases without stock items; works with the retrieved masters |
+| Ledgers submitted with every generation; memory only suggests | A person decides every mapping; a remembered choice can never post silently |
+| One import XML per voucher, stored with its SHA-256 | Phase 8 imports and verifies each voucher individually; the approved bytes are the imported bytes |
+| Marker from the file hash in every narration | Lets Phase 8 detect an earlier import in TallyPrime even after a database rebuild |
+| Freshness computed on read (content digest, run, masters, eligibility) | An edit after generation can never be approved unnoticed |
 
 ## Known issues
 
@@ -519,6 +600,9 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | The Tally host's license server (port 9999) answers anyone on the tailnet, including the license serial number | Low risk inside a private tailnet | Windows Firewall on `desktop-a0fljal`: allow 9000 only from `100.111.30.101` and block 9999 from the tailnet if not needed |
 | TallyPrime must be running with the company loaded | When it is closed, status shows *Unreachable* and retrieval is impossible | Open TallyPrime and the company, then **Check connection** |
 | 3 ledger GSTINs in TallyPrime fail the check character | Invoices cannot be matched to those suppliers by GSTIN | Correct them in TallyPrime; the *GSTIN fails check* filter lists them |
+| Some bank ledger names contain the full account number | The name appears unmasked on the TallyPrime and Generate pages (names cannot be masked without losing which ledger it is) | Rename the ledgers in TallyPrime (e.g. keep the last 4 digits) and enter the number in the ledger's bank details |
+| Bill-wise payments are recorded *On Account* | Supplier outstanding is not reduced bill by bill | Adjust against bills in TallyPrime; bill matching may come later |
+| No voucher can be generated for a supplier or ledger missing in TallyPrime | Masters are never created by this application | Create the ledger in TallyPrime, retrieve masters again, then generate |
 | SQLite stores datetimes without an offset | Naive values would reach the browser and be misread as local time | `UtcDateTime` column type stores UTC, always returns UTC-aware values and refuses naive input |
 
 ## TallyPrime connectivity prerequisites (Phase 6)
@@ -534,5 +618,5 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 
 1. Foundation ✅ · 2. Upload & processing foundation ✅ · 3. PDF text & OCR ✅ ·
 4. AI extraction ✅ · 5. Duplicates & accounting validation ✅ · 6. Tally read-only ✅ ·
-7. Voucher generation · 8. Approval & controlled import · 9. Dashboard,
+7. Voucher generation ✅ · 8. Approval & controlled import · 9. Dashboard,
 security & networking · 10. End-to-end testing & deployment

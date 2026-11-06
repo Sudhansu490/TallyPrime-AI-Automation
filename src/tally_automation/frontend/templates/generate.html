@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>Voucher generation</h1>
+  <form class="actions" id="picker">
+    <label class="inline-label">Document
+      <select id="document-select" aria-label="Document to generate vouchers for"><option value="">Loading…</option></select>
+    </label>
+    <button type="button" class="btn btn-secondary" id="reload">Reload</button>
+  </form>
+</div>
+
+<p class="alert alert-info small">
+  <strong>Nothing is sent to TallyPrime.</strong> Generating builds the TallyPrime import XML on Computer A with the
+  ledgers you choose and checks it against the retrieved masters. Importing is a separate step with explicit approval
+  (Phase 8). Suggested ledgers come from the same GSTIN or account number and from your earlier choices; review every one.
+</p>
+
+<div id="page-message" role="status" aria-live="polite"></div>
+
+<section class="card" id="setup-card" hidden aria-labelledby="setup-heading">
+  <div class="section-header">
+    <h2 id="setup-heading">Ledgers</h2>
+    <label class="inline-label">TallyPrime company
+      <select id="company-select" aria-label="TallyPrime company"></select>
+    </label>
+  </div>
+  <div id="eligibility"></div>
+  <p class="small muted" id="company-meta"></p>
+
+  <form id="mapping-form" hidden>
+    <div id="invoice-mapping" hidden>
+      <dl class="stat-grid compact" id="invoice-summary"></dl>
+      <ul class="check-list" id="plan-checks"></ul>
+      <div class="table-wrap">
+        <table class="table mapping-table">
+          <thead><tr><th>Entry</th><th>Dr / Cr</th><th>Amount</th><th>TallyPrime ledger</th></tr></thead>
+          <tbody id="invoice-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="statement-mapping" hidden>
+      <div class="mapping-grid" id="statement-head"></div>
+      <p class="small muted">Tick the transactions to generate, and choose the other ledger for each. A transaction
+        with a bank or cash ledger becomes a Contra voucher. Unticked transactions are left for entry in TallyPrime.</p>
+      <div class="table-wrap">
+        <table class="table mapping-table">
+          <thead><tr><th><span class="visually-hidden">Generate</span></th><th>#</th><th>Date</th><th>Description</th>
+            <th>Out</th><th>In</th><th>Other ledger</th></tr></thead>
+          <tbody id="transaction-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="generate-message" role="status" aria-live="polite"></div>
+    <div class="actions">
+      <button type="submit" class="btn" id="generate">Generate vouchers</button>
+      <span class="small muted">Generating again replaces this document's earlier vouchers.</span>
+    </div>
+  </form>
+</section>
+
+<section class="card" id="vouchers-card" hidden aria-labelledby="vouchers-heading">
+  <div class="section-header">
+    <h2 id="vouchers-heading">Generated vouchers</h2>
+    <label class="inline-label small"><input type="checkbox" id="show-superseded"> Show replaced vouchers</label>
+  </div>
+  <div id="vouchers-message" role="status" aria-live="polite"></div>
+  <div id="vouchers"></div>
+</section>
+{% endblock %}
