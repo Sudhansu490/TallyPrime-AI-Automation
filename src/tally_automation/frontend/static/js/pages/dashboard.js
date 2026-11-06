@@ -19,7 +19,7 @@ function render(health) {
   setBadge(
     document.getElementById("health-tally"),
     "neutral",
-    health.tally_configured ? "Configured (not tested)" : "Not configured",
+    health.tally_configured ? "Configured — see TallyPrime page" : "Not configured",
   );
   setBadge(
     document.getElementById("health-tally-writes"),

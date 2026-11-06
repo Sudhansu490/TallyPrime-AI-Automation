@@ -22,6 +22,14 @@ from tally_automation.db.models.extraction import (
     Invoice,
     InvoiceLineItem,
 )
+from tally_automation.db.models.tally import (
+    SyncStatus,
+    TallyCompany,
+    TallyGroup,
+    TallyLedger,
+    TallySyncRun,
+    TallyVoucherType,
+)
 from tally_automation.db.models.user import AppUser, UserRole
 from tally_automation.db.models.validation import (
     DuplicateKind,
@@ -59,6 +67,12 @@ __all__ = [
     "ProcessingStage",
     "ReviewDecision",
     "StageStatus",
+    "SyncStatus",
+    "TallyCompany",
+    "TallyGroup",
+    "TallyLedger",
+    "TallySyncRun",
+    "TallyVoucherType",
     "TextSource",
     "UserRole",
     "ValidationOutcome",

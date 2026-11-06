@@ -76,9 +76,16 @@ class Settings(BaseSettings):
     # Fields the model reports below this confidence are flagged for review.
     llm_low_confidence: float = Field(default=0.8, gt=0, lt=1)
 
+    # TallyPrime (Phase 6: read-only). The host must be loopback or a Tailscale
+    # address; see `tally_automation.tally.client.validate_tally_host`.
     tally_host: str | None = None
     tally_port: int = Field(default=9000, ge=1, le=65535)
+    # Connection checks and small requests.
     tally_timeout_seconds: float = Field(default=15, gt=0)
+    # Master exports (a company can have thousands of ledgers).
+    tally_export_timeout_seconds: float = Field(default=120, gt=0)
+    tally_max_response_mb: int = Field(default=100, ge=1, le=1000)
+    # Company selected by default on the TallyPrime page (must be loaded in Tally).
     tally_company: str | None = None
     tally_write_enabled: bool = False
 

@@ -253,6 +253,12 @@ dialog { max-width: 40rem; width: calc(100% - 2rem); border: 1px solid var(--bor
 .match-head { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .evidence-table td, .evidence-table th[scope="row"] { overflow-wrap: anywhere; }
 .evidence-table th[scope="row"] { color: var(--text); }
+/* TallyPrime page (Phase 6) */
+.tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--border); margin: 0.5rem 0 1rem; }
+.tab { font: inherit; padding: 0.45rem 0.9rem; border: 1px solid transparent; border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; background: none; color: var(--primary); cursor: pointer; }
+.tab[aria-selected="true"] { border-color: var(--border); background: var(--surface); color: var(--text); font-weight: 600; margin-bottom: -1px; }
+.tab:focus-visible { outline: 3px solid var(--info-fg); outline-offset: 2px; }
+.filters input[type="search"] { font: inherit; padding: 0.35rem 0.5rem; border: 1px solid var(--border); border-radius: var(--radius); min-width: 16rem; }
 dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 .field-facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 0.75rem; font-size: 0.9rem; }
 .field-facts dt { color: var(--muted); }

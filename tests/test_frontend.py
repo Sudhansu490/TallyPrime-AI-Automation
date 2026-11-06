@@ -55,6 +55,7 @@ PAGES = [
     ("/processing", "Document processing", "pages/processing.js"),
     ("/review", "Extracted data review", "pages/review.js"),
     ("/duplicates", "Duplicate management", "pages/duplicates.js"),
+    ("/tally", "TallyPrime integration", "pages/tally.js"),
 ]
 
 
@@ -111,6 +112,7 @@ def test_unbuilt_pages_are_not_served(client: TestClient) -> None:
         ("/static/js/pages/processing.js", "text/javascript"),
         ("/static/js/pages/review.js", "text/javascript"),
         ("/static/js/pages/duplicates.js", "text/javascript"),
+        ("/static/js/pages/tally.js", "text/javascript"),
         ("/static/favicon.svg", "image/svg+xml"),
     ],
 )

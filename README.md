@@ -3,12 +3,13 @@
 AI-assisted processing of purchase invoices and bank statements into
 TallyPrime vouchers, with mandatory human review and approval.
 
-**Status: Phase 5 (duplicates and accounting validation).** Documents are uploaded,
-validated, de-duplicated (exact file), and processed by a background worker: embedded PDF
-text, OCR only where needed, structured extraction by an LLM (Groq), then accounting
-validation and business-level duplicate detection. Reviewers correct values on the Review
-page and decide possible duplicates on the Duplicates page (both audited). Tally
-communication does not exist yet. Nothing in this codebase can write to TallyPrime.
+**Status: Phase 6 (TallyPrime read-only).** Documents are uploaded, validated,
+de-duplicated (exact file), and processed by a background worker: embedded PDF text, OCR
+only where needed, structured extraction by an LLM (Groq), then accounting validation and
+business-level duplicate detection. Reviewers correct values on the Review page and decide
+possible duplicates on the Duplicates page (both audited). The backend reads companies,
+groups, ledgers and voucher types from TallyPrime. Nothing in this codebase can write to
+TallyPrime.
 
 ## Principles
 
@@ -36,10 +37,12 @@ Computer B (browser) ──Tailscale──▶ Computer A: one FastAPI process
 - Only the backend talks to TallyPrime. The browser never does.
 - No port is ever opened to the public internet.
 
-Observed environment (re-inspected 2026-11-05): Computer A is `SUDHANSU`
+Observed environment (re-inspected 2026-11-06): Computer A is `SUDHANSU`
 (Tailscale `100.111.30.101`, tailnet account `shivamacc1593@`; Windows 11 Pro,
-i5-12500, 32 GB RAM, no usable GPU, so OCR runs on CPU). The tailnet has no other
-devices yet, and TallyPrime is not installed on Computer A. An earlier inspection on
+i5-12500, 32 GB RAM, no usable GPU, so OCR runs on CPU). TallyPrime is not installed on
+Computer A. The **TallyPrime host is `desktop-a0fljal`** (Tailscale `100.124.182.62`,
+confirmed by the owner on 2026-11-06): TallyPrime 6.2 serves XML on port 9000 and its
+license server answers on 9999. Computer B has not joined the tailnet yet. An earlier inspection on
 2026-11-04 recorded a different machine (`desktop-6fjvg7s`, `100.95.249.91`); that
 entry is superseded.
 
@@ -76,6 +79,12 @@ src/tally_automation/
     accounting.py    extraction and accounting checks (pure functions, never change values)
     duplicates.py    Level 2 (invoice) and Level 3 (bank transaction) matching rules
     service.py       run checks, store results, refresh matches, eligibility, reviewer decisions
+  tally/
+    xmlio.py         Export request templates, read-only guard, tolerant response parsing
+    client.py        HTTP client: host rules, timeouts, size limit, companies and masters
+    masters.py       parsing of companies, groups, ledgers, voucher types; primary groups
+    service.py       connection check, snapshot retrieval, interrupted-run recovery
+  network.py         Tailscale address ranges (bind addresses and TallyPrime host)
   frontend/
     routes.py        HTML page routes and navigation
     templates/       Jinja2 layout and page shells
@@ -339,6 +348,62 @@ six existing extractions:
   (document 6) by the look-alike rule, the case Phase 4 could not detect.
 * Re-uploads of the same invoices and the same statement were all matched with their evidence.
 
+## TallyPrime read-only integration (Phase 6)
+
+The backend on Computer A reads master data from TallyPrime over XML/HTTP. The browser never
+contacts TallyPrime. **This build cannot write to TallyPrime at all:** the client has no import
+method, every request body is built from fixed templates as `<TALLYREQUEST>Export</TALLYREQUEST>`
+of an inline TDL collection, and `assert_read_only` refuses anything containing `Import`,
+`IMPORTDATA`, `TALLYMESSAGE` or `ACTION=` immediately before it reaches the network (tested).
+`TALLY_WRITE_ENABLED` stays `false`; voucher import is Phase 8 and needs explicit approval.
+
+**Network rules.** `TALLY_HOST` must be loopback or a Tailscale address. A hostname is accepted
+only if every address it resolves to is. Proxy environment variables are ignored, redirects are
+not followed, and responses over `TALLY_MAX_RESPONSE_MB` are refused.
+
+**What is retrieved** (per company, only companies currently *loaded* in TallyPrime):
+
+| Master | Fields | Not retrieved |
+|---|---|---|
+| Groups | name, aliases, parent, primary group (computed), revenue/balance-sheet, debit/credit nature | — |
+| Ledgers | name, aliases, parent and primary group, GSTIN (latest dated registration, checksum-tested), GST registration type and state, tax type, GST duty head and rate, bank account no. and IFSC (bank ledgers), bill-wise | balances, addresses, contacts, PAN |
+| Voucher types | name, aliases, base type (Purchase, Payment, …), numbering method, active | — |
+
+A retrieval replaces the company's stored snapshot in one transaction. If anything fails, the
+previous snapshot stays and the run is recorded as failed with the reason. Only one retrieval
+runs at a time, and runs interrupted by a shutdown are marked failed at the next start. Bank
+account numbers are stored in full (to match statements to bank ledgers in Phase 7) and masked
+in every response. Logs record counts and timings only, never ledger names, GSTINs or account
+numbers.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/tally/status` | Live check: server running, response time, loaded companies, read-only mode |
+| `POST /api/v1/tally/sync` | `{"company": "<exact name>"}`: retrieve that loaded company's masters |
+| `GET /api/v1/tally/sync-runs` | Retrieval history with counts, warnings and errors |
+| `GET /api/v1/tally/companies` | Companies retrieved at least once, with counts |
+| `GET /api/v1/tally/companies/{guid}/ledgers` | Search (`q` = name or GSTIN), `group`, `kind` = `gst_party` \| `gst_duty` \| `bank` \| `invalid_gstin`, paged |
+| `GET /api/v1/tally/companies/{guid}/groups` | Groups with primary group and nature |
+| `GET /api/v1/tally/companies/{guid}/voucher-types` | Voucher types with base type, numbering and active flag |
+
+**Observed with the real TallyPrime 6.2 on `desktop-a0fljal` (2026-11-06):**
+
+* `GET /` answers `TallyPrime Server is Running`; the license server on port 9999 reports
+  release 6.2.0 (27317). One company was loaded.
+* All masters (40 groups, 1,827 ledgers, 25 voucher types) were read in **0.9 s**, with every
+  ledger resolved to its primary group except *Profit & Loss A/c* (it has no group by design).
+* TallyPrime sends XML that strict parsers reject: `&#4;` markers and raw control characters
+  (`0x02`) inside values. They are removed before parsing and counted per retrieval.
+* GSTINs live mostly in the dated `LEDGSTREGDETAILS` list (TallyPrime 4+), not in the old
+  `PARTYGSTIN` field (311 versus 184 ledgers), so the latest dated entry is used.
+* **3 ledger GSTINs fail the GSTIN check character** (probably mistyped in Tally). They are flagged
+  (*GSTIN fails check* filter) so Phase 7 will not match invoices against them silently.
+* **An unknown company name is not an error:** TallyPrime answers `STATUS 1` with no records.
+  The client therefore checks the company against the loaded list first, and treats a company
+  with no groups or voucher types (every company has predefined ones) as a failure.
+* When TallyPrime is closed, port 9000 refuses connections while the license server on 9999
+  keeps answering; the status page reports *Unreachable* with the reason.
+
 ## Setup (Windows 11, Python 3.12.10)
 
 The project uses the existing `tally_env` virtual environment.
@@ -433,6 +498,9 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | Duplicates are flagged, never rejected | Same date and amount is common for genuine records; a person decides with the evidence |
 | Eligibility computed on demand | Depends on edits, decisions and matches in other documents; a cached flag could go stale |
 | Validation runs in a savepoint after extraction | A bug in validation must not throw away a paid LLM extraction |
+| TallyPrime client has no write path at all in Phase 6 | Read-only is enforced by construction and by a guard on every request body, not by a setting |
+| Masters stored as a per-company snapshot, keyed by Tally GUID | Mapping (Phase 7) needs them offline and consistent; GUIDs survive renames |
+| Inline TDL collections instead of built-in reports | Exactly the fields needed, nothing more; no TDL is installed in TallyPrime |
 
 ## Known issues
 
@@ -447,7 +515,10 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | Validation results become outdated if the rules change | Stored results keep their `rules_version` | **Run validation again** (or `POST /documents/{id}/validate`) re-checks without an LLM call |
 | PaddleOCR 2.9 import takes ~20 s | The first OCR'd document after startup waits for the model | Loaded once per process, lazily in the worker thread, so app startup is not delayed |
 | No login yet | Anyone who can reach the app can upload | Keep `BIND_HOSTS=127.0.0.1` until Phase 9 |
-| The tailnet contains only Computer A | Computer B and the Tally host cannot connect yet | Join both devices to Computer A's tailnet (account `shivamacc1593@`) |
+| Computer B is not on the tailnet yet | Uploads only from Computer A | Join it to the tailnet (account `shivamacc1593@`) |
+| The Tally host's license server (port 9999) answers anyone on the tailnet, including the license serial number | Low risk inside a private tailnet | Windows Firewall on `desktop-a0fljal`: allow 9000 only from `100.111.30.101` and block 9999 from the tailnet if not needed |
+| TallyPrime must be running with the company loaded | When it is closed, status shows *Unreachable* and retrieval is impossible | Open TallyPrime and the company, then **Check connection** |
+| 3 ledger GSTINs in TallyPrime fail the check character | Invoices cannot be matched to those suppliers by GSTIN | Correct them in TallyPrime; the *GSTIN fails check* filter lists them |
 | SQLite stores datetimes without an offset | Naive values would reach the browser and be misread as local time | `UtcDateTime` column type stores UTC, always returns UTC-aware values and refuses naive input |
 
 ## TallyPrime connectivity prerequisites (Phase 6)
@@ -462,6 +533,6 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 ## Phases
 
 1. Foundation ✅ · 2. Upload & processing foundation ✅ · 3. PDF text & OCR ✅ ·
-4. AI extraction ✅ · 5. Duplicates & accounting validation ✅ · 6. Tally read-only ·
+4. AI extraction ✅ · 5. Duplicates & accounting validation ✅ · 6. Tally read-only ✅ ·
 7. Voucher generation · 8. Approval & controlled import · 9. Dashboard,
 security & networking · 10. End-to-end testing & deployment

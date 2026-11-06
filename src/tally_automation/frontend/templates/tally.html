@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>TallyPrime integration</h1>
+  <button type="button" class="btn" id="check">Check connection</button>
+</div>
+
+<p class="alert alert-info small">
+  <strong>Read-only.</strong> This application only <em>reads</em> from TallyPrime (export requests from
+  Computer A; your browser never contacts TallyPrime). Nothing is created, altered or imported in TallyPrime.
+  Voucher import arrives in Phase 8 and will need explicit approval.
+</p>
+
+<section class="card" aria-labelledby="connection-heading">
+  <h2 id="connection-heading">Connection</h2>
+  <div id="connection-message" role="status" aria-live="polite"></div>
+  <dl class="status-grid" id="connection-grid" hidden>
+    <div class="status-item"><dt>TallyPrime host</dt><dd id="conn-host"></dd></div>
+    <div class="status-item"><dt>Server</dt><dd id="conn-server"></dd></div>
+    <div class="status-item"><dt>Response time</dt><dd id="conn-time"></dd></div>
+    <div class="status-item"><dt>Mode</dt><dd id="conn-mode"></dd></div>
+  </dl>
+  <p class="muted small" id="conn-detail"></p>
+</section>
+
+<section class="card" aria-labelledby="loaded-heading">
+  <h2 id="loaded-heading">Companies loaded in TallyPrime</h2>
+  <div id="sync-message" role="status" aria-live="polite"></div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Company</th><th>Books from</th><th>State</th><th></th></tr></thead>
+      <tbody id="loaded-body"></tbody>
+    </table>
+  </div>
+  <p class="small muted">“Retrieve masters” reads groups, ledgers and voucher types (no balances, addresses or vouchers)
+    and replaces this application's stored copy for that company.</p>
+</section>
+
+<section class="card" aria-labelledby="masters-heading">
+  <div class="section-header">
+    <h2 id="masters-heading">Retrieved masters</h2>
+    <label class="inline-label">Company
+      <select id="company-select" aria-label="Company whose masters to show"></select>
+    </label>
+  </div>
+  <div id="masters-message" role="status" aria-live="polite"></div>
+  <p class="small muted" id="masters-meta"></p>
+  <div class="tabs" role="tablist" aria-label="Master type">
+    <button type="button" class="tab" role="tab" id="tab-ledgers" aria-selected="true" aria-controls="panel-ledgers">Ledgers</button>
+    <button type="button" class="tab" role="tab" id="tab-groups" aria-selected="false" aria-controls="panel-groups">Groups</button>
+    <button type="button" class="tab" role="tab" id="tab-vtypes" aria-selected="false" aria-controls="panel-vtypes">Voucher types</button>
+  </div>
+
+  <div id="panel-ledgers" role="tabpanel" aria-labelledby="tab-ledgers">
+    <form class="filters" id="ledger-filters">
+      <label>Search name or GSTIN<input type="search" id="ledger-q" maxlength="100" autocomplete="off"></label>
+      <label>Show
+        <select id="ledger-kind">
+          <option value="">All ledgers</option>
+          <option value="gst_party">Parties with GSTIN</option>
+          <option value="invalid_gstin">GSTIN fails check</option>
+          <option value="gst_duty">GST duty ledgers</option>
+          <option value="bank">Bank ledgers</option>
+        </select>
+      </label>
+    </form>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Ledger</th><th>Under</th><th>GSTIN</th><th>GST type / state</th><th>Tax</th><th>Bank</th></tr></thead>
+        <tbody id="ledgers-body"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <span class="small muted" id="ledger-range"></span>
+      <button type="button" class="btn btn-secondary btn-small" id="ledger-prev">Previous</button>
+      <button type="button" class="btn btn-secondary btn-small" id="ledger-next">Next</button>
+    </div>
+  </div>
+
+  <div id="panel-groups" role="tabpanel" aria-labelledby="tab-groups" hidden>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Group</th><th>Under</th><th>Primary group</th><th>Nature</th></tr></thead>
+        <tbody id="groups-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="panel-vtypes" role="tabpanel" aria-labelledby="tab-vtypes" hidden>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Voucher type</th><th>Type of voucher</th><th>Numbering</th><th>Active</th></tr></thead>
+        <tbody id="vtypes-body"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="runs-heading">
+  <h2 id="runs-heading">Retrieval history</h2>
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Started</th><th>Company</th><th>Result</th><th>Groups</th><th>Ledgers</th><th>Voucher types</th><th>Notes</th></tr></thead>
+      <tbody id="runs-body"></tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
