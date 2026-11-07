@@ -7,6 +7,9 @@
     python -m tally_automation users set-role NAME approver
     python -m tally_automation users deactivate NAME | activate NAME
     python -m tally_automation users unlock NAME
+    python -m tally_automation migrate                  # update the database schema
+    python -m tally_automation backup                   # database + documents copy
+    python -m tally_automation check [--no-tally]       # pre-flight check of this installation
 
 Passwords are typed at a hidden prompt (twice), or read from standard input
 with ``--password-stdin``; never passed as command-line arguments, where they
@@ -85,10 +88,36 @@ def users(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def operations(args: argparse.Namespace, settings: Settings) -> int:
+    from tally_automation import operations as ops
+
+    if args.command == "migrate":
+        before, after = ops.migrate(settings)
+        print(f"Database schema: {before or 'empty'} -> {after}." if before != after else f"Database schema already up to date ({after}).")
+        return 0
+    if args.command == "backup":
+        result = ops.backup(settings)
+        print(f"Database copied to {result.database_copy} ({result.size_bytes / 1e6:.1f} MB, integrity ok); "
+              f"{result.documents_copied} new of {result.documents_total} stored documents copied; "
+              f"{result.removed_old} old copy(ies) removed.")
+        return 0
+    findings = ops.preflight(settings, contact_tally=not args.no_tally)
+    marks = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
+    for f in findings:
+        print(f"[{marks[f.level]}] {f.name}: {f.detail}")
+    failures = sum(f.level == "fail" for f in findings)
+    print(f"{failures} problem(s) to fix." if failures else "Ready to run.")
+    return 1 if failures else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tally_automation")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="run the web application (default)")
+    sub.add_parser("migrate", help="update the database schema to the latest version")
+    sub.add_parser("backup", help="copy the database and stored documents to BACKUP_DIR")
+    check = sub.add_parser("check", help="pre-flight check of this installation")
+    check.add_argument("--no-tally", action="store_true", help="do not contact TallyPrime")
     user_parser = sub.add_parser("users", help="manage user accounts")
     actions = user_parser.add_subparsers(dest="action", required=True)
     actions.add_parser("list")
@@ -113,4 +142,6 @@ def main(argv: list[str] | None = None) -> int:
 
         run()
         return 0
+    if args.command in ("migrate", "backup", "check"):
+        return operations(args, get_settings())
     return users(args, get_settings())

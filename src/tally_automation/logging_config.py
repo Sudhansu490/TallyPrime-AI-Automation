@@ -50,12 +50,17 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str, ensure_ascii=False)
 
 
-def configure_logging(level: str = "INFO", log_dir: Path | None = None) -> None:
-    """Configure root logging. Safe to call more than once."""
+def configure_logging(level: str = "INFO", log_dir: Path | None = None, *, console: bool = True) -> None:
+    """Configure root logging. Safe to call more than once.
+
+    ``console=False`` (``LOG_TO_CONSOLE=false``, set by deploy/run-app.ps1) writes only
+    to the rotating ``app.log``, so a supervised process's redirected output cannot grow
+    without limit. Uncaught crashes still reach stderr.
+    """
     formatter = JsonFormatter()
     redactor = RedactingFilter()
 
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    handlers: list[logging.Handler] = [logging.StreamHandler()] if console or log_dir is None else []
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
         handlers.append(

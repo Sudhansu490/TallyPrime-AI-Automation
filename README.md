@@ -3,7 +3,8 @@
 AI-assisted processing of purchase invoices and bank statements into
 TallyPrime vouchers, with mandatory human review and approval.
 
-**Status: Phase 9 (login, roles, security).** Documents are uploaded, validated,
+**Status: all 10 phases complete (Phase 10: end-to-end tests, performance, deployment).**
+Documents are uploaded, validated,
 de-duplicated (exact file), and processed by a background worker: embedded PDF text, OCR
 only where needed, structured extraction by an LLM (Groq), then accounting validation and
 business-level duplicate detection. Reviewers correct values on the Review page and decide
@@ -54,7 +55,8 @@ entry is superseded.
 ```
 src/tally_automation/
   __main__.py        `python -m tally_automation` → cli.main()
-  cli.py             server (default) and `users …` account management
+  cli.py             server (default), `users …`, `migrate`, `backup`, `check`
+  operations.py      schema status/migration, backups, pre-flight check
   server.py          bind-address policy + Uvicorn launcher
   config.py          settings from environment / .env
   logging_config.py  JSON logs with redaction of sensitive fields
@@ -623,6 +625,85 @@ TallyPrime, failed and unclear imports, and blocked vouchers, each linking to th
 | `GET /api/v1/vouchers/stats` | Voucher counts for the dashboard |
 | `GET /api/v1/health/live` | Public liveness probe (no details) |
 
+## Deployment on Computer A (Phase 10)
+
+The app runs as one Python process on Computer A, started with Windows by Task Scheduler (no
+extra software), kept running by a small supervisor script, and backed up daily. Browsers use
+plain HTTP inside the tailnet; Tailscale's WireGuard tunnel encrypts every connection, and the
+app keeps seeing each device's real address for the allow-list and the audit trail.
+
+### First deployment
+
+1. **Settings** (`.env`): `APP_ENV=production` (hides `/docs`), `BIND_HOSTS=127.0.0.1,<Computer A
+   Tailscale IP>`, and `BACKUP_DIR` on another drive or disk (e.g. `D:\TallyAutomationBackups`).
+   Leave `TALLY_WRITE_ENABLED=false` until you are ready to import.
+2. **Schema and first administrator:**
+   ```powershell
+   tally_env\Scripts\python -m tally_automation migrate
+   tally_env\Scripts\python -m tally_automation users create NAME --role admin
+   ```
+3. **Pre-flight check** (also contacts TallyPrime, read-only; `--no-tally` skips that):
+   ```powershell
+   tally_env\Scripts\python -m tally_automation check
+   ```
+   `FAIL` lines must be fixed; `WARN` lines are worth reading.
+4. **Start with Windows** — in PowerShell opened *as administrator*, from the project folder:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File deploy\install-tasks.ps1 -AllowTailnet
+   ```
+   This runs the check, then registers two tasks under `\TallyAutomation\` that run as your
+   Windows user whether or not anyone is logged in (S4U: no password is stored):
+   * **Tally Automation** – at startup (1 minute delay, so Tailscale is up), runs
+     `deploy\run-app.ps1`, which starts the app and starts it again 10 s after it stops. After 5
+     stops within 5 minutes it gives up (a configuration problem, not a crash).
+   * **Tally Automation backup** – daily at 02:00 (`-BackupTime 21:30` to change).
+   * `-AllowTailnet` adds one firewall rule: TCP 8000 from `100.64.0.0/10` only (for Computer B).
+5. Open `http://127.0.0.1:8000/` on Computer A, or `http://<Computer A Tailscale IP>:8000/` on
+   Computer B, and log in.
+
+`deploy\uninstall-tasks.ps1` (as administrator) removes the tasks and the firewall rule; data,
+documents, backups and `.env` stay.
+
+### Operating it
+
+| Task | How |
+|---|---|
+| Is it running? | `Get-ScheduledTask -TaskPath \TallyAutomation\ \| Get-ScheduledTaskInfo`, or `http://127.0.0.1:8000/api/v1/health/live` |
+| Logs | `data\logs\app.log` (JSON, rotated), `data\logs\supervisor.log` (starts/stops), `data\logs\app-stderr.log` |
+| Backup now | `tally_automation backup` (consistent while the app runs; integrity-checked; keeps `BACKUP_KEEP` copies) |
+| Restore | Stop the task, copy the chosen `tally_automation-YYYYMMDD-HHMMSS.db` over `data\tally_automation.db`, copy `uploads\` back into `data\uploads\`, start the task, run `check` |
+| Upgrade | Stop the task · `git pull` · `pip install -r` / `-e .` if dependencies changed · `tally_automation migrate` · `tally_automation check` · start the task. The server refuses to start on an outdated schema |
+| Allow imports | Set `TALLY_WRITE_ENABLED=true` in `.env`, restart the task |
+| Accounts | `tally_automation users …` (see Phase 9) |
+
+(`tally_automation …` = `tally_env\Scripts\python -m tally_automation …` from the project folder.)
+
+### Verified on Computer A (2026-11-07)
+
+* The supervisor started the production launcher; the app answered at once, and after its
+  process was killed it was running again ~10 s later. (Tasks themselves are registered by you,
+  as administrator; they were not installed by this phase's checks.)
+* `backup`: 1.4 MB database copy, integrity ok, 11 stored documents copied.
+* `check`: schema current, directories writable, both bind addresses valid, Groq key set,
+  TallyPrime answered in 78 ms with one company open, writes disabled. Open items: no
+  administrator yet, `APP_ENV=development`, backups on the same drive.
+
+## Performance (Phase 10)
+
+Measured with `tests\perf_volume.py` (300 synthetic invoices from one supplier + 30 two-page
+statements, fake LLM; real duplicate detection and validation):
+
+| Request | Time |
+|---|---|
+| Dashboard figures | 209 ms (was 1,514 ms: eligibility is now computed in bulk) |
+| Documents list (200) | 81 ms |
+| Duplicates page | 230 ms |
+| Re-validate one invoice (with duplicate search over 300) | 79 ms |
+| Voucher setup, vouchers list, voucher figures | 5–24 ms |
+
+The real bottlenecks are elsewhere and deliberate: OCR (seconds per scanned page, CPU) and the
+Groq rate limit (about one document per minute on the free tier).
+
 ## Setup (Windows 11, Python 3.12.10)
 
 The project uses the existing `tally_env` virtual environment.
@@ -685,6 +766,14 @@ Tests use a temporary SQLite database per test, ignore `.env`, never start a
 real server, and never need TallyPrime. Test data is synthetic and labelled as such.
 The worker is disabled in tests and driven directly with a fake OCR engine; one test
 (marker `ocr`, ~25 s) runs the real PaddleOCR. Skip it with `pytest -m "not ocr"`.
+
+`tests/test_end_to_end.py` drives the whole workflow through the HTTP API with each role:
+upload → text → AI extraction (fake LLM) → correction → validation → masters (fake TallyPrime)
+→ purchase, payment and contra vouchers → approval → import → read-back, then checks the
+dashboard figures and that the logs contain no account numbers, GSTINs, party or ledger names
+or tokens. Browser automation (Playwright) was deliberately not added: it needs ~150 MB of
+extra packages, the pages hold no business logic, and every page was checked in a browser
+during development. `tests/perf_volume.py` is a manual volume timing script (not collected).
 
 ## Database migrations
 
@@ -756,7 +845,8 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | Validation results become outdated if the rules change | Stored results keep their `rules_version` | **Run validation again** (or `POST /documents/{id}/validate`) re-checks without an LLM call |
 | PaddleOCR 2.9 import takes ~20 s | The first OCR'd document after startup waits for the model | Loaded once per process, lazily in the worker thread, so app startup is not delayed |
 | No user accounts exist yet on Computer A | Nobody can log in until the first one is created | `python -m tally_automation users create NAME --role admin` |
-| The app is served over HTTP inside the tailnet | The session cookie has no `Secure` flag (WireGuard encrypts the link) | Optional HTTPS with `tailscale serve` / `tailscale cert` in Phase 10 |
+| The app is served over HTTP inside the tailnet | The session cookie has no `Secure` flag (WireGuard encrypts the link) | Kept deliberately (Phase 10): `tailscale serve` would add HTTPS but make every request appear to come from Computer A, losing device addresses in the allow-list and audit trail |
+| Backups go to `data\backups` unless `BACKUP_DIR` is set | A disk failure would take data and backups together | Set `BACKUP_DIR` to another drive or disk (the check warns) |
 | Records made before Phase 9 have no user | History shows the device instead | — |
 | Computer B is not on the tailnet yet | Uploads only from Computer A | Join it to the tailnet (account `shivamacc1593@`) |
 | The Tally host's license server (port 9999) answers anyone on the tailnet, including the license serial number | Low risk inside a private tailnet | Windows Firewall on `desktop-a0fljal`: allow 9000 only from `100.111.30.101` and block 9999 from the tailnet if not needed |
@@ -789,4 +879,4 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 7. Voucher generation ✅
 8. Approval & controlled import ✅
 9. Dashboard, security & networking ✅
-10. End-to-end testing & deployment
+10. End-to-end testing & deployment ✅

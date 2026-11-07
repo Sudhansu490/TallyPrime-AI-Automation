@@ -25,7 +25,7 @@ from tally_automation.db.models import (
     ApprovalStatus, GeneratedVoucher, ImportStatus, ValidationOutcome, VoucherStatus,
 )
 from tally_automation.documents.validation import FileValidationError, allowed_extensions
-from tally_automation.validation.service import eligibility
+from tally_automation.validation.service import eligible_document_ids
 from tally_automation.processing.worker import RequeueError, requeue_document
 
 logger = logging.getLogger(__name__)
@@ -332,7 +332,7 @@ def document_stats(session: SessionDep) -> DocumentStats:
         duplicates=counts.get(DocumentStatus.DUPLICATE, 0),
         possible_duplicates=sum(1 for v in validations.values() if v.open_duplicates),
         validation_failed=sum(1 for v in validations.values() if v.outcome is ValidationOutcome.FAILED),
-        ready_for_vouchers=sum(1 for doc_id in processed_ids if eligibility(session, doc_id).eligible),
+        ready_for_vouchers=len(eligible_document_ids(session, processed_ids)),
         pending_approvals=session.scalar(select(func.count()).select_from(GeneratedVoucher).where(
             GeneratedVoucher.status == VoucherStatus.READY,
             GeneratedVoucher.approval_status == ApprovalStatus.PENDING,

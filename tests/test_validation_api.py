@@ -194,3 +194,29 @@ def test_decisions_reject_cross_site_requests(client: TestClient) -> None:
     response = client.post("/api/v1/duplicates/review", json={"match_ids": [1], "decision": "duplicate"},
                            headers={"Origin": "https://evil.example"})
     assert response.status_code == 403
+
+
+def test_bulk_eligibility_matches_the_per_document_rules(client: TestClient) -> None:
+    from tally_automation.validation.service import eligibility, eligible_document_ids
+
+    def check() -> set[int]:
+        with client.app.state.session_factory() as session:
+            single = {d for d in documents if eligibility(session, d).eligible}
+            assert eligible_document_ids(session, documents) == single
+            return single
+
+    first = processed_invoice(client)
+    second = processed_invoice(client, "\nSYNTHETIC SECOND COPY")
+    text = INVOICE_TEXT.replace("Grand Total 1,180.00", "Grand Total 1,280.00").replace("SYN-0001", "SYN-0099")
+    failed = upload(client, text_pdf(text))
+    process(client, FakeLlm(invoice_reply(header={"invoice_number": field("SYN-0099"),
+                                                  "grand_total": field("1,280.00", "Grand Total 1,280.00")})))
+    documents = [first, second, failed]
+    assert check() == set()                        # open duplicate + failed validation
+    match = client.get("/api/v1/duplicates").json()["matches"][0]
+    client.post(f"/api/v1/duplicates/{match['id']}/review", json={"decision": "duplicate"})
+    assert check() == {first}
+    client.post(f"/api/v1/duplicates/{match['id']}/review", json={"decision": "reopened"})
+    client.post(f"/api/v1/duplicates/{match['id']}/review", json={"decision": "not_duplicate"})
+    assert check() == {first, second}
+    assert client.get("/api/v1/documents/stats").json()["ready_for_vouchers"] == 2

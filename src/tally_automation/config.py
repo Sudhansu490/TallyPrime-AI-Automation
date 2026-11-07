@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     app_name: str = "Tally Automation"
     app_env: Environment = Environment.DEVELOPMENT
     log_level: str = "INFO"
+    # false: log only to data/logs/app.log (rotated), not to the console (supervised runs).
+    log_to_console: bool = True
     secret_key: SecretStr | None = None
 
     data_dir: Path = Path("data")
@@ -79,6 +81,11 @@ class Settings(BaseSettings):
     password_min_length: int = Field(default=12, ge=10, le=128)
     # When true, a voucher cannot be approved by the person who generated it.
     require_separate_approver: bool = False
+
+    # Backups (Phase 10): `python -m tally_automation backup`. Blank = DATA_DIR/backups;
+    # better another drive or disk. The newest BACKUP_KEEP database copies are kept.
+    backup_dir_setting: Path | None = Field(default=None, alias="BACKUP_DIR")
+    backup_keep: int = Field(default=14, ge=1, le=365)
 
     # AI extraction (Phase 4). Unset provider = extraction disabled: documents
     # stop at text_extracted and nothing leaves Computer A.
@@ -201,6 +208,13 @@ class Settings(BaseSettings):
     @property
     def log_dir(self) -> Path:
         return self.data_dir / "logs"
+
+    @property
+    def backup_dir(self) -> Path:
+        if self.backup_dir_setting is None:
+            return self.data_dir / "backups"
+        path = self.backup_dir_setting
+        return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
     @property
     def max_upload_size_bytes(self) -> int:

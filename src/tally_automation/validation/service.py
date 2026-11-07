@@ -270,6 +270,35 @@ def eligibility(session: Session, document_id: int) -> Eligibility:
     return Eligibility(not reasons, reasons, sorted(set(excluded)))
 
 
+def eligible_document_ids(session: Session, document_ids: list[int] | None = None) -> set[int]:
+    """Bulk form of ``eligibility`` for counts (three queries instead of several per document).
+
+    Same rules: processed, validated on the current extraction without errors, no
+    unreviewed possible duplicate, and not the confirmed later copy of an invoice.
+    """
+    runs = current_run_ids(session, document_ids)
+    if not runs:
+        return set()
+    outcomes = dict(session.execute(
+        select(ValidationResult.extraction_run_id, ValidationResult.outcome)
+        .where(ValidationResult.extraction_run_id.in_(runs.values()))
+    ).all())
+    blocked: set[int] = set()
+    for doc, other, status, kind in session.execute(
+        select(DuplicateMatch.document_id, DuplicateMatch.other_document_id, DuplicateMatch.status, DuplicateMatch.kind)
+        .where(or_(DuplicateMatch.status == MatchStatus.OPEN,
+                   (DuplicateMatch.status == MatchStatus.DUPLICATE) & (DuplicateMatch.kind == DuplicateKind.INVOICE)))
+    ):
+        if status is MatchStatus.OPEN:
+            blocked.update((doc, other))
+        else:
+            blocked.add(doc)       # the newer record of a confirmed duplicate invoice
+    return {
+        doc for doc, run in runs.items()
+        if run in outcomes and outcomes[run] is not ValidationOutcome.FAILED and doc not in blocked
+    }
+
+
 # ---- Reviewer decisions ----------------------------------------------------------------------------
 
 def review_match(

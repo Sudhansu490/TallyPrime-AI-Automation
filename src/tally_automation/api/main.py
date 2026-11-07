@@ -135,5 +135,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 def build_app() -> FastAPI:
     """Entry point for `uvicorn --factory`: configures logging, then builds the app."""
     settings = get_settings()
-    configure_logging(settings.log_level, settings.log_dir)
+    configure_logging(settings.log_level, settings.log_dir, console=settings.log_to_console)
     return create_app(settings)

@@ -60,8 +60,17 @@ def _bind_socket(address: ipaddress.IPv4Address | ipaddress.IPv6Address, port: i
 
 def run(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
-    configure_logging(settings.log_level, settings.log_dir)
+    configure_logging(settings.log_level, settings.log_dir, console=settings.log_to_console)
     addresses = [validate_bind_host(host) for host in settings.bind_hosts]
+
+    # Refuse to run on a database whose schema does not match this code.
+    from tally_automation.operations import schema_status
+
+    current, head = schema_status(settings)
+    if current != head:
+        logger.error("database schema is not up to date; run 'python -m tally_automation migrate'",
+                     extra={"current": current, "expected": head})
+        raise SystemExit(1)
 
     sockets: list[socket.socket] = []
     try:

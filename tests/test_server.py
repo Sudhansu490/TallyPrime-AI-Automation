@@ -72,6 +72,8 @@ def test_run_binds_exactly_the_configured_addresses(launcher_settings: Settings,
             sock.close()
 
     monkeypatch.setattr(server.uvicorn.Server, "run", fake_run)
+    # The schema guard is tested in test_operations; here the database is not the subject.
+    monkeypatch.setattr("tally_automation.operations.schema_status", lambda settings: ("head", "head"))
     port = _free_port()
     server.run(launcher_settings.model_copy(update={"app_port": port}))
     assert captured == [("127.0.0.1", port)]
