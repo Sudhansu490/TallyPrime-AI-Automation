@@ -61,3 +61,13 @@ def health(settings: SettingsDep, engine: EngineDep, response: Response) -> Heal
         llm_model=(settings.llm_model or DEFAULT_MODELS.get(settings.llm_provider))
         if settings.llm_provider else None,
     )
+
+
+class LiveResponse(BaseModel):
+    status: Literal["ok"]
+
+
+@router.get("/health/live", response_model=LiveResponse)
+def live() -> LiveResponse:
+    """Public liveness probe (no login): says only that the process answers."""
+    return LiveResponse(status="ok")

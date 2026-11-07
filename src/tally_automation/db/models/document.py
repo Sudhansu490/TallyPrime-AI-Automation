@@ -102,6 +102,7 @@ class Document(TimestampMixin, Base):
     document_type: Mapped[DocumentType] = mapped_column(str_enum(DocumentType, "document_type"))
     # Display only (sanitised). Storage never uses it.
     original_filename: Mapped[str] = mapped_column(String(255))
+    uploaded_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="RESTRICT"))
     status: Mapped[DocumentStatus] = mapped_column(str_enum(DocumentStatus, "document_status"))
     duplicate_of_id: Mapped[int | None] = mapped_column(
         ForeignKey("documents.id", ondelete="RESTRICT")

@@ -5,8 +5,9 @@ is a different voucher and needs its own approval. Only a *ready* voucher that
 is not out of date can be approved, and its warnings must be acknowledged.
 Every decision is appended to ``voucher_approvals``; nothing is ever deleted.
 
-Until login exists (Phase 9) the API accepts decisions only from Computer A
-itself; the deciding device is recorded with every decision.
+Only users with the approver (or admin) role may decide (Phase 9); the user
+and their device are recorded with every decision. With
+``REQUIRE_SEPARATE_APPROVER=true`` nobody may approve a voucher they generated.
 """
 
 from __future__ import annotations
@@ -39,23 +40,26 @@ def _locked(voucher: GeneratedVoucher) -> None:
 
 
 def _record(session: Session, voucher: GeneratedVoucher, decision: ApprovalDecision, *, note: str | None,
-            client_address: str | None, warnings: int = 0) -> VoucherApproval:
+            client_address: str | None, warnings: int = 0, user_id: int | None = None) -> VoucherApproval:
     record = VoucherApproval(
         voucher_id=voucher.id, decision=decision, xml_sha256=voucher.xml_sha256, warnings_acknowledged=warnings,
-        note=note, client_address=client_address, decided_at=utc_now(),
+        note=note, client_address=client_address, decided_at=utc_now(), decided_by_user_id=user_id,
     )
     session.add(record)
     return record
 
 
 def approve(session: Session, voucher_id: int, *, acknowledge_warnings: bool, note: str | None,
-            client_address: str | None) -> GeneratedVoucher:
+            client_address: str | None, user_id: int | None = None,
+            separate_approver: bool = False) -> GeneratedVoucher:
     voucher = _voucher(session, voucher_id)
     _locked(voucher)
     if voucher.status is not VoucherStatus.READY or voucher.xml_sha256 is None:
         raise VoucherError("blocked", "Only a ready voucher can be approved; this one has errors.")
     if voucher.approval_status is ApprovalStatus.APPROVED:
         raise VoucherError("already_approved", "This voucher is already approved.")
+    if separate_approver and user_id is not None and voucher.generated_by_user_id == user_id:
+        raise VoucherError("same_person", "You generated this voucher; another approver must approve it.")
     reasons = stale_reasons(session, voucher)
     if reasons:
         raise VoucherError("stale", "The voucher is out of date: " + " ".join(reasons))
@@ -65,11 +69,12 @@ def approve(session: Session, voucher_id: int, *, acknowledge_warnings: bool, no
     voucher.approval_status = ApprovalStatus.APPROVED
     voucher.approved_xml_sha256 = voucher.xml_sha256
     _record(session, voucher, ApprovalDecision.APPROVED, note=note, client_address=client_address,
-            warnings=voucher.warning_count)
+            warnings=voucher.warning_count, user_id=user_id)
     return voucher
 
 
-def reject(session: Session, voucher_id: int, *, note: str, client_address: str | None) -> GeneratedVoucher:
+def reject(session: Session, voucher_id: int, *, note: str, client_address: str | None,
+           user_id: int | None = None) -> GeneratedVoucher:
     voucher = _voucher(session, voucher_id)
     _locked(voucher)
     if voucher.approval_status is ApprovalStatus.REJECTED:
@@ -78,12 +83,12 @@ def reject(session: Session, voucher_id: int, *, note: str, client_address: str 
     voucher.approved_xml_sha256 = None
     if voucher.import_status is ImportStatus.FAILED:
         voucher.import_status = ImportStatus.NOT_IMPORTED
-    _record(session, voucher, ApprovalDecision.REJECTED, note=note, client_address=client_address)
+    _record(session, voucher, ApprovalDecision.REJECTED, note=note, client_address=client_address, user_id=user_id)
     return voucher
 
 
 def revoke(session: Session, voucher_id: int, *, note: str | None, client_address: str | None,
-           voucher: GeneratedVoucher | None = None) -> GeneratedVoucher:
+           voucher: GeneratedVoucher | None = None, user_id: int | None = None) -> GeneratedVoucher:
     voucher = voucher or _voucher(session, voucher_id)
     _locked(voucher)
     if voucher.approval_status is not ApprovalStatus.APPROVED:
@@ -92,5 +97,5 @@ def revoke(session: Session, voucher_id: int, *, note: str | None, client_addres
     voucher.approved_xml_sha256 = None
     if voucher.import_status is ImportStatus.FAILED:
         voucher.import_status = ImportStatus.NOT_IMPORTED
-    _record(session, voucher, ApprovalDecision.REVOKED, note=note, client_address=client_address)
+    _record(session, voucher, ApprovalDecision.REVOKED, note=note, client_address=client_address, user_id=user_id)
     return voucher

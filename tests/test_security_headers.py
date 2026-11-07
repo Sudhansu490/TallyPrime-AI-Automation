@@ -3,6 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from auth_helpers import login_as
 from tally_automation.api.main import create_app
 from tally_automation.api.middleware import CONTENT_SECURITY_POLICY
 from tally_automation.config import Settings
@@ -64,5 +65,6 @@ def test_configured_tailscale_host_is_accepted(settings: Settings, migrated_engi
         "extra_allowed_hosts": ["computer-a.example.ts.net"],
     })
     with TestClient(create_app(tailnet), base_url="http://127.0.0.1") as client:
+        login_as(client)
         for host in ("100.95.0.1:8000", "computer-a.example.ts.net", "localhost:8000"):
             assert client.get("/api/v1/health", headers={"Host": host}).status_code == 200

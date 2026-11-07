@@ -72,20 +72,22 @@ def check_connection(client: TallyClient) -> ConnectionCheck:
 _sync_lock = threading.Lock()
 
 
-def sync_company(session_factory: sessionmaker[Session], client: TallyClient, company_name: str) -> int:
+def sync_company(session_factory: sessionmaker[Session], client: TallyClient, company_name: str,
+                 user_id: int | None = None) -> int:
     """Retrieve and store one loaded company's masters. Returns the sync run id."""
     if not _sync_lock.acquire(blocking=False):
         raise SyncError("sync_in_progress", "A retrieval from TallyPrime is already running.")
     try:
-        return _sync(session_factory, client, company_name)
+        return _sync(session_factory, client, company_name, user_id)
     finally:
         _sync_lock.release()
 
 
-def _sync(session_factory: sessionmaker[Session], client: TallyClient, company_name: str) -> int:
+def _sync(session_factory: sessionmaker[Session], client: TallyClient, company_name: str,
+          user_id: int | None = None) -> int:
     with transaction(session_factory) as session:
         run = TallySyncRun(company_name=company_name, host=client.host, port=client.port, status=SyncStatus.RUNNING,
-                           warnings=[])
+                           warnings=[], started_by_user_id=user_id)
         session.add(run)
         session.flush()
         run_id = run.id

@@ -3,7 +3,7 @@
 AI-assisted processing of purchase invoices and bank statements into
 TallyPrime vouchers, with mandatory human review and approval.
 
-**Status: Phase 8 (approval and controlled import).** Documents are uploaded, validated,
+**Status: Phase 9 (login, roles, security).** Documents are uploaded, validated,
 de-duplicated (exact file), and processed by a background worker: embedded PDF text, OCR
 only where needed, structured extraction by an LLM (Groq), then accounting validation and
 business-level duplicate detection. Reviewers correct values on the Review page and decide
@@ -11,7 +11,8 @@ possible duplicates on the Duplicates page (both audited). The backend reads com
 groups, ledgers and voucher types from TallyPrime, and builds and checks TallyPrime voucher
 XML with ledgers a reviewer chooses. Approved vouchers are imported into TallyPrime one at a
 time from Computer A, only with `TALLY_WRITE_ENABLED=true`, never twice, and verified by
-reading them back.
+reading them back. Every page and API needs a login; roles (viewer, reviewer, approver,
+admin) decide who may change data, approve and import.
 
 ## Principles
 
@@ -52,11 +53,16 @@ entry is superseded.
 
 ```
 src/tally_automation/
-  __main__.py        `python -m tally_automation` → server.run()
+  __main__.py        `python -m tally_automation` → cli.main()
+  cli.py             server (default) and `users …` account management
   server.py          bind-address policy + Uvicorn launcher
   config.py          settings from environment / .env
   logging_config.py  JSON logs with redaction of sensitive fields
-  security.py        password hashing (stdlib scrypt)
+  security.py        password hashing (stdlib scrypt), session token helpers
+  auth/
+    service.py       accounts, login, lockout, server-side sessions, password changes
+    middleware.py    client allow-list, login gate, CSRF check
+    deps.py          current user and role requirements for routes
   api/               app factory, dependencies, middleware, JSON routes
   documents/
     validation.py    extension, magic-byte and structural (PyMuPDF / Pillow) checks
@@ -548,6 +554,75 @@ its masters replaces the stored masters of the real company (same GUID, the copy
 testing in a copy, close it, open the real company and retrieve its masters again; the
 application's import always names the company and refuses when that company is not open.
 
+## Login, roles and security (Phase 9)
+
+**Every page and API needs a login**, except the login page itself, static assets and a bare
+liveness probe (`GET /api/v1/health/live`). Pages redirect to `/login` (and back afterwards,
+to same-site paths only); the API answers `401`.
+
+**Accounts** are created and managed only on Computer A, from the command line; there is no
+self-registration and no password is ever passed as an argument:
+
+```powershell
+python -m tally_automation users create sudhansu --role admin --display-name "Sudhansu"
+python -m tally_automation users list
+python -m tally_automation users set-password NAME      # hidden prompt, twice
+python -m tally_automation users set-role NAME approver
+python -m tally_automation users deactivate NAME        # also: activate, unlock
+```
+
+| Role | May |
+|---|---|
+| viewer | read every page and record |
+| reviewer | + upload, reprocess, correct extracted values, re-validate, decide duplicates, retrieve TallyPrime masters, generate vouchers |
+| approver | + approve, reject and withdraw vouchers, import them into TallyPrime |
+| admin | everything (user management stays on the command line) |
+
+Roles are enforced on the backend for every state-changing endpoint (`403 forbidden`); pages
+only hide what the role cannot do. Every action records the user (and the device): uploads,
+edits, duplicate decisions, masters retrievals, voucher generation, approvals and imports. With
+`REQUIRE_SEPARATE_APPROVER=true`, nobody can approve a voucher they generated. This replaces
+Phase 8's interim "approve and import only on Computer A" rule.
+
+**Passwords and sessions.**
+
+* Passwords: scrypt (standard library, OWASP parameters N=2^17, r=8, p=1; ~0.3 s per check),
+  at least 12 characters, not containing the username. Hashes are re-computed at login if
+  stronger parameters are introduced later.
+* Sessions are server-side (`user_sessions`). The browser holds only a random 256-bit token in
+  an `HttpOnly`, `SameSite=Strict` cookie; the database stores only its SHA-256. Nothing is put
+  in `localStorage`/`sessionStorage`.
+* A session ends after `SESSION_IDLE_MINUTES` (60) of inactivity, after `SESSION_MAX_HOURS` (12),
+  at logout, and when the password or role changes or the account is deactivated.
+* `LOGIN_MAX_FAILURES` (5) wrong passwords lock the account for `LOGIN_LOCKOUT_MINUTES` (15).
+  Unknown usernames get the same answer, in the same time, as wrong passwords.
+* The cookie gets the `Secure` flag when served over HTTPS. Inside the tailnet the app is served
+  over HTTP; Tailscale's WireGuard tunnel already encrypts the connection between devices.
+
+**CSRF.** Every POST/PUT/PATCH/DELETE under `/api/` must carry the session's own CSRF token
+in `X-CSRF-Token` (the page receives it in a `<meta>` tag; `api.js` adds it). This comes on top
+of the SameSite=Strict cookie and the existing Origin/`Sec-Fetch-Site` check.
+
+**Network.** Requests pass, in order: the trusted-Host check (DNS rebinding), security headers
+(CSP without inline scripts, no-store, frame denial, …), the **client allow-list**, the
+cross-site check, then login and CSRF. `ALLOWED_CLIENT_NETWORKS` defaults to this computer and
+the tailnet; list specific Tailscale IPs to admit only Computer A and Computer B. Only loopback
+and Tailscale ranges are accepted in that setting, and the server binds only loopback/Tailscale
+addresses (`BIND_HOSTS`, no `0.0.0.0`). Uvicorn ignores `X-Forwarded-*`, so client addresses
+cannot be spoofed through headers.
+
+**Dashboard** now also shows vouchers awaiting approval, approved but not imported, in
+TallyPrime, failed and unclear imports, and blocked vouchers, each linking to the Vouchers page.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/auth/login` | `{"username", "password"}`; sets the session cookie |
+| `POST /api/v1/auth/logout` | Ends the session |
+| `GET /api/v1/auth/me` | The signed-in user and role |
+| `POST /api/v1/auth/password` | Change one's own password (ends other sessions) |
+| `GET /api/v1/vouchers/stats` | Voucher counts for the dashboard |
+| `GET /api/v1/health/live` | Public liveness probe (no details) |
+
 ## Setup (Windows 11, Python 3.12.10)
 
 The project uses the existing `tally_env` virtual environment.
@@ -579,16 +654,24 @@ Open http://127.0.0.1:8000/ for the dashboard.
 Health check: `GET /api/v1/health`.
 Interactive API docs are at `/docs` outside production (`APP_ENV=production` disables them).
 
+### First start
+
+Create the first administrator on Computer A (the app logs a warning while no account exists):
+
+```powershell
+python -m tally_automation users create NAME --role admin
+```
+
 ### Access from Computer B
 
-Do this only once login exists (Phase 9), or on a tailnet you fully control.
-
-1. Join Computer B to the same tailnet.
+1. Create an account for each person who will use Computer B (`users create …`).
+2. Join Computer B to the same tailnet.
 2. In `.env`, set `BIND_HOSTS=127.0.0.1,<output of tailscale ip -4>`. Optionally
    set `EXTRA_ALLOWED_HOSTS=<Computer A MagicDNS name>`.
 3. Allow inbound TCP `APP_PORT` on Computer A in Windows Firewall, from
    `100.64.0.0/10` only. Do not accept Windows' "allow on all networks" prompt.
-4. Browse to `http://<Computer A Tailscale IP>:8000/` from Computer B.
+4. Optionally narrow `ALLOWED_CLIENT_NETWORKS` to `127.0.0.1/32,<A's IP>/32,<B's IP>/32`.
+5. Browse to `http://<Computer A Tailscale IP>:8000/` from Computer B and log in.
 
 Requests with any other `Host` header are rejected with HTTP 400 (DNS-rebinding protection).
 
@@ -650,7 +733,12 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | One import XML per voucher, stored with its SHA-256 | Phase 8 imports and verifies each voucher individually; the approved bytes are the imported bytes |
 | Marker from the file hash in every narration | Lets Phase 8 detect an earlier import in TallyPrime even after a database rebuild |
 | Freshness computed on read (content digest, run, masters, eligibility) | An edit after generation can never be approved unnoticed |
-| Approve/import only from Computer A until Phase 9 | Login arrives in Phase 9; restricting to the processing computer is enforceable on the backend now |
+| Approve/import only from Computer A until Phase 9 | Login arrives in Phase 9; restricting to the processing computer is enforceable on the backend now (replaced by roles in Phase 9) |
+| Server-side sessions, token hashed in the database | Logout, idle timeout and password changes end sessions at once; a database leak reveals no usable token |
+| Per-session CSRF token in a header, plus SameSite=Strict and Origin checks | Several independent defences against cross-site requests |
+| scrypt from the standard library instead of bcrypt/argon2 | Memory-hard, OWASP-recommended, and needs no extra package |
+| Accounts only via the command line on Computer A | No self-registration or admin web page to attack; managing a handful of users needs nothing more |
+| Client allow-list of loopback/Tailscale ranges | A second barrier behind Tailscale ACLs and the bind addresses |
 | Separate guards for reading and importing, and no import without `TALLY_WRITE_ENABLED` | A bug elsewhere cannot turn a read into a write, or send anything but one new voucher |
 | Lookup by marker before every import | Makes retries after an unclear answer safe; protects against posting twice even after a database rebuild |
 | Read-back verification after import | TallyPrime's "created" is confirmed against what was approved |
@@ -667,7 +755,9 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | Duplicate candidates are compared in Python after an indexed pre-filter (GSTIN, date, amount; account and dates) | Fine for thousands of documents | Revisit with a normalised invoice-number column if volume grows |
 | Validation results become outdated if the rules change | Stored results keep their `rules_version` | **Run validation again** (or `POST /documents/{id}/validate`) re-checks without an LLM call |
 | PaddleOCR 2.9 import takes ~20 s | The first OCR'd document after startup waits for the model | Loaded once per process, lazily in the worker thread, so app startup is not delayed |
-| No login yet | Anyone who can reach the app can upload; approval and import are limited to Computer A | Keep `BIND_HOSTS=127.0.0.1` until Phase 9 |
+| No user accounts exist yet on Computer A | Nobody can log in until the first one is created | `python -m tally_automation users create NAME --role admin` |
+| The app is served over HTTP inside the tailnet | The session cookie has no `Secure` flag (WireGuard encrypts the link) | Optional HTTPS with `tailscale serve` / `tailscale cert` in Phase 10 |
+| Records made before Phase 9 have no user | History shows the device instead | — |
 | Computer B is not on the tailnet yet | Uploads only from Computer A | Join it to the tailnet (account `shivamacc1593@`) |
 | The Tally host's license server (port 9999) answers anyone on the tailnet, including the license serial number | Low risk inside a private tailnet | Windows Firewall on `desktop-a0fljal`: allow 9000 only from `100.111.30.101` and block 9999 from the tailnet if not needed |
 | TallyPrime must be running with the company loaded | When it is closed, status shows *Unreachable* and retrieval is impossible | Open TallyPrime and the company, then **Check connection** |
@@ -698,5 +788,5 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 6. Tally read-only ✅
 7. Voucher generation ✅
 8. Approval & controlled import ✅
-9. Dashboard, security & networking
+9. Dashboard, security & networking ✅
 10. End-to-end testing & deployment

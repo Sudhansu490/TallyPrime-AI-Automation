@@ -16,6 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from tally_automation.api.deps import SessionDep
+from tally_automation.auth.deps import Reviewer
+from tally_automation.auth.service import user_names
 from tally_automation.db.models import (
     BankStatement, BankTransaction, Document, DocumentType, EditableEntity, ExtractionRun, FieldEdit, Invoice,
     InvoiceLineItem, JobStatus, ProcessingJob, ValidationOutcome,
@@ -137,6 +139,7 @@ class EditRecordOut(BaseModel):
     new_raw: str | None
     reason: str | None
     edited_by_user_id: int | None
+    edited_by: str | None
     client_address: str | None
     edited_at: datetime
 
@@ -260,7 +263,7 @@ def get_extraction(document_id: int, session: SessionDep) -> ExtractionOut:
 )
 def edit_field(
     entity: EditableEntity, entity_id: int, field_name: str, body: FieldEditIn, request: Request,
-    session: SessionDep,
+    session: SessionDep, user: Reviewer,
 ) -> FieldEditOut | JSONResponse:
     """Replace one extracted value. The backend re-parses and re-checks it; the
     previous value is kept and the edit is recorded in the audit trail."""
@@ -270,6 +273,7 @@ def edit_field(
         with transaction(factory) as tx:
             edited, meta = apply_edit(
                 tx, entity, entity_id, field_name, body.value, reason=body.reason, client_address=client,
+                user_id=user.id,
             )
             if isinstance(edited, BankStatement):
                 secrets = statement_secrets(edited)
@@ -306,12 +310,14 @@ def list_edits(entity: EditableEntity, entity_id: int, session: SessionDep) -> l
         .order_by(FieldEdit.id)
     ).all()
     masked = {s.name for s in ENTITY_FIELDS[entity] if s.value_type is ValueType.ACCOUNT_NUMBER}
+    names = user_names(session, {e.edited_by_user_id for e in edits})
     return [
         EditRecordOut(
             field_name=e.field_name,
             old_raw=mask_account_number(e.old_raw) if e.field_name in masked else e.old_raw,
             new_raw=mask_account_number(e.new_raw) if e.field_name in masked else e.new_raw,
-            reason=e.reason, edited_by_user_id=e.edited_by_user_id, client_address=e.client_address,
+            reason=e.reason, edited_by_user_id=e.edited_by_user_id, edited_by=names.get(e.edited_by_user_id),
+            client_address=e.client_address,
             edited_at=e.edited_at,
         )
         for e in edits

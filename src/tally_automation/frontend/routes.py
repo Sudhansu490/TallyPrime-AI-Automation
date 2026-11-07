@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from tally_automation import __version__
@@ -55,6 +55,7 @@ NAV_ITEMS: tuple[NavItem, ...] = (
 
 def _render(request: Request, template: str, *, title: str, page_script: str) -> HTMLResponse:
     settings = request.app.state.settings
+    user = getattr(request.state, "user", None)
     return templates.TemplateResponse(
         request,
         template,
@@ -65,8 +66,31 @@ def _render(request: Request, template: str, *, title: str, page_script: str) ->
             "nav_items": NAV_ITEMS,
             "current_path": request.url.path,
             "page_script": page_script,
+            # Logged-in user for the header; the CSRF token goes into a <meta> tag
+            # for api.js (never into browser storage).
+            "user": user,
+            "csrf_token": user.csrf_token if user else "",
         },
     )
+
+
+def safe_next(value: str | None) -> str:
+    """Only same-site relative paths: never redirect to another site after login."""
+    if not value or not value.startswith("/") or value.startswith("//") or "\\" in value:
+        return "/"
+    return value
+
+
+@router.get("/login", response_class=HTMLResponse)
+def login(request: Request, next: str | None = None) -> HTMLResponse:  # noqa: A002 - query parameter name
+    if getattr(request.state, "user", None) is not None:
+        return RedirectResponse(safe_next(next), status_code=303)
+    return _render(request, "login.html", title="Log in", page_script="pages/login.js")
+
+
+@router.get("/account", response_class=HTMLResponse)
+def account(request: Request) -> HTMLResponse:
+    return _render(request, "account.html", title="Account", page_script="pages/account.js")
 
 
 @router.get("/", response_class=HTMLResponse)

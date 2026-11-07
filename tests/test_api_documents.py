@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
 from synthetic_files import make_image, make_pdf
+from auth_helpers import login_as
 from tally_automation.api.main import create_app
 from tally_automation.config import Settings
 
@@ -110,6 +111,7 @@ def test_chunked_upload_without_length_rejected(client: TestClient) -> None:
 def small_limit_client(settings: Settings, migrated_engine: Engine) -> Iterator[TestClient]:
     limited = settings.model_copy(update={"max_upload_size_mb": 1})
     with TestClient(create_app(limited), base_url="http://127.0.0.1") as client:
+        login_as(client)
         yield client
 
 

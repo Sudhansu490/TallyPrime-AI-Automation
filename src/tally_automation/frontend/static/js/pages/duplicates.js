@@ -80,7 +80,7 @@ function history(match) {
   return el("details", {}, [
     el("summary", { className: "small", text: `Decision history (${match.reviews.length})` }),
     el("ul", { className: "small" }, match.reviews.map((r) => {
-      const who = r.reviewed_by_user_id ? `user #${r.reviewed_by_user_id}` : `device ${r.client_address ?? "unknown"} (no login yet)`;
+      const who = r.reviewed_by ?? `device ${r.client_address ?? "unknown"} (before login existed)`;
       return el("li", { text: `${formatDateTime(r.reviewed_at)} · ${who}: ${DECISION_TEXT[r.decision]}` + (r.note ? ` · “${r.note}”` : "") });
     })),
   ]);

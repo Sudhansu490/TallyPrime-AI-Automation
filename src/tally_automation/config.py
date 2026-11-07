@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Annotated
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import make_url
+
+from tally_automation.network import TAILSCALE_IPV4, TAILSCALE_IPV6
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,6 +63,22 @@ class Settings(BaseSettings):
     # Host-header names accepted in addition to loopback names and bind_hosts,
     # e.g. Computer A's MagicDNS name. Blocks DNS-rebinding attacks.
     extra_allowed_hosts: Annotated[list[str], NoDecode] = []
+    # Client addresses allowed to talk to the app at all (Phase 9). Default:
+    # this computer and any device on the tailnet; narrow it to specific
+    # Tailscale IPs (e.g. 127.0.0.1/32,100.x.y.z/32) to admit only those devices.
+    allowed_client_networks: Annotated[list[str], NoDecode] = [
+        "127.0.0.0/8", "::1/128", "100.64.0.0/10", "fd7a:115c:a1e0::/48",
+    ]
+
+    # Login and sessions (Phase 9). Sessions are server-side; the browser only
+    # holds a random token in an HttpOnly, SameSite=Strict cookie.
+    session_idle_minutes: int = Field(default=60, ge=5, le=24 * 60)
+    session_max_hours: int = Field(default=12, ge=1, le=7 * 24)
+    login_max_failures: int = Field(default=5, ge=3, le=20)
+    login_lockout_minutes: int = Field(default=15, ge=1, le=24 * 60)
+    password_min_length: int = Field(default=12, ge=10, le=128)
+    # When true, a voucher cannot be approved by the person who generated it.
+    require_separate_approver: bool = False
 
     # AI extraction (Phase 4). Unset provider = extraction disabled: documents
     # stop at text_extracted and nothing leaves Computer A.
@@ -127,7 +146,7 @@ class Settings(BaseSettings):
             raise ValueError("LLM_REASONING_EFFORT must be low, medium or high")
         return value
 
-    @field_validator("bind_hosts", "extra_allowed_hosts", mode="before")
+    @field_validator("bind_hosts", "extra_allowed_hosts", "allowed_client_networks", mode="before")
     @classmethod
     def _split_comma_list(cls, value: object) -> object:
         # Environment values are comma-separated: BIND_HOSTS=127.0.0.1,100.x.y.z
@@ -140,6 +159,20 @@ class Settings(BaseSettings):
     def _at_least_one_bind_host(cls, value: list[str]) -> list[str]:
         if not value:
             raise ValueError("bind_hosts must contain at least one address")
+        return value
+
+    @field_validator("allowed_client_networks")
+    @classmethod
+    def _private_networks_only(cls, value: list[str]) -> list[str]:
+        for item in value:
+            network = ipaddress.ip_network(item, strict=False)
+            inside = network.is_loopback or any(
+                network.subnet_of(allowed) for allowed in (TAILSCALE_IPV4, TAILSCALE_IPV6) if allowed.version == network.version
+            )
+            if not inside:
+                raise ValueError(f"allowed_client_networks: {item} is neither loopback nor inside the Tailscale ranges")
+        if not value:
+            raise ValueError("allowed_client_networks must not be empty")
         return value
 
     @field_validator("data_dir")

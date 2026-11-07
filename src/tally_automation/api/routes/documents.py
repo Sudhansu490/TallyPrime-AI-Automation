@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from starlette.datastructures import UploadFile
 
 from tally_automation.api.deps import IngestorDep, SessionDep, SettingsDep
+from tally_automation.auth.deps import Reviewer
 from tally_automation.db.models import (
     Document, DocumentPage, DocumentStatus, DocumentType, JobStatus, MediaType, ProcessingJob,
     ProcessingStage, StageStatus, TextSource,
@@ -240,7 +241,7 @@ def upload_limits(settings: SettingsDep) -> UploadLimits:
     }}}}},
 )
 async def upload_document(
-    request: Request, settings: SettingsDep, ingestor: IngestorDep
+    request: Request, settings: SettingsDep, ingestor: IngestorDep, user: Reviewer,
 ) -> DocumentOut | JSONResponse:
     """Upload one file. Identical re-uploads are recorded as duplicates (still 201)."""
     # Enforce the size limit before reading the body. The HTTP server frames the
@@ -275,7 +276,7 @@ async def upload_document(
                 "invalid_document_type",
             )
         try:
-            result = await run_in_threadpool(ingestor.ingest, upload.file, upload.filename, document_type)
+            result = await run_in_threadpool(ingestor.ingest, upload.file, upload.filename, document_type, user.id)
         except FileValidationError as exc:
             logger.info("upload rejected", extra={"code": exc.code, "document_type": document_type.value})
             code = 413 if exc.code == "file_too_large" else 422
@@ -398,7 +399,7 @@ def _page_out(page: DocumentPage, threshold: float) -> PageTextOut:
     "/{document_id}/reprocess", response_model=DocumentOut,
     responses={404: {"model": ErrorOut}, 409: {"model": ErrorOut}},
 )
-def reprocess_document(document_id: int, ingestor: IngestorDep) -> DocumentOut | JSONResponse:
+def reprocess_document(document_id: int, ingestor: IngestorDep, user: Reviewer) -> DocumentOut | JSONResponse:
     """Queue a new attempt (all stages) for a failed document, or for one whose AI
     extraction has not run yet. Earlier attempts are kept."""
     try:

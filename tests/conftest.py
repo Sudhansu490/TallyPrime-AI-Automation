@@ -11,6 +11,7 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
+from auth_helpers import login_as
 from tally_automation.api.main import create_app
 from tally_automation.config import PROJECT_ROOT, Environment, Settings
 from tally_automation.db.session import create_db_engine
@@ -49,4 +50,7 @@ def migrated_engine(settings: Settings, alembic_config: Config) -> Iterator[Engi
 def client(settings: Settings, migrated_engine: Engine) -> Iterator[TestClient]:
     # A real loopback Host header, so TrustedHostMiddleware is exercised as in production.
     with TestClient(create_app(settings), base_url="http://127.0.0.1") as test_client:
+        # Phase 9: every page and API needs a login. Tests run as a synthetic admin
+        # unless they log out or log in as another role (see auth_helpers).
+        login_as(test_client)
         yield test_client

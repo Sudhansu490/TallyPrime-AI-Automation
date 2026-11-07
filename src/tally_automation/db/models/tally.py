@@ -47,6 +47,7 @@ class TallySyncRun(Base):
     removed_characters: Mapped[int | None] = mapped_column(Integer)
     warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
     error_message: Mapped[str | None] = mapped_column(Text)
+    started_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="RESTRICT"))
     started_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
     finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
 

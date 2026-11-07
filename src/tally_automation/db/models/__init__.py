@@ -30,7 +30,7 @@ from tally_automation.db.models.tally import (
     TallySyncRun,
     TallyVoucherType,
 )
-from tally_automation.db.models.user import AppUser, UserRole
+from tally_automation.db.models.user import AppUser, UserRole, UserSession
 from tally_automation.db.models.validation import (
     DuplicateKind,
     DuplicateMatch,
@@ -96,6 +96,7 @@ __all__ = [
     "TallyVoucherType",
     "TextSource",
     "UserRole",
+    "UserSession",
     "ValidationOutcome",
     "ValidationResult",
     "VoucherApproval",

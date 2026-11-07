@@ -14,13 +14,18 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from tally_automation import __version__
 from tally_automation.api.middleware import install_origin_check, install_security_headers
-from tally_automation.api.routes import documents, extractions, health, tally, validation, vouchers
+from tally_automation.api.routes import auth, documents, extractions, health, tally, validation, vouchers
+from tally_automation.auth.deps import Forbidden, NotAuthenticated
+from tally_automation.auth.middleware import install_auth, install_client_allowlist
+from tally_automation.auth.service import user_count
+from sqlalchemy.exc import SQLAlchemyError
 from tally_automation.config import Environment, Settings, get_settings
 from tally_automation.db.session import create_db_engine, create_session_factory
 from tally_automation.documents.service import DocumentIngestor
@@ -51,6 +56,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.tally_transport = getattr(app.state, "tally_transport", None)
         recover_interrupted_syncs(app.state.session_factory)
         recover_interrupted_imports(app.state.session_factory)
+        try:
+            with app.state.session_factory() as session:
+                if user_count(session) == 0:
+                    logger.warning("no user accounts: nobody can log in. Create one with "
+                                   "'python -m tally_automation users create NAME --role admin'")
+        except SQLAlchemyError:
+            pass   # database not migrated yet
         worker = None
         if settings.processing_worker_enabled:
             # The OCR model loads lazily inside the worker thread on first use.
@@ -89,14 +101,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None if is_production else "/openapi.json",
     )
     # No CORSMiddleware on purpose: the browser only ever calls this same origin.
-    # Middleware added later runs earlier, so the origin check's 403 still gets headers.
+    # Middleware added later runs earlier. Resulting order per request:
+    # Host check → security headers → client allow-list → origin check → login/CSRF → route,
+    # so every refusal still carries the security headers.
+    install_auth(app, docs_paths=tuple(p for p in (docs_url, "/openapi.json" if docs_url else None) if p))
     install_origin_check(app)
+    install_client_allowlist(app, settings, allow_test_client=settings.app_env is Environment.TEST)
     install_security_headers(app, docs_path=docs_url)
+
+    @app.exception_handler(Forbidden)
+    async def forbidden(request: Request, exc: Forbidden) -> JSONResponse:
+        return JSONResponse(status_code=403, content={"detail": exc.message, "code": "forbidden"})
+
+    @app.exception_handler(NotAuthenticated)
+    async def not_authenticated(request: Request, exc: NotAuthenticated) -> JSONResponse:
+        return JSONResponse(status_code=401, content={"detail": "Please log in.", "code": "not_authenticated"})
     # Reject requests whose Host header is not ours (DNS-rebinding protection).
     # Added last so it runs first.
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
 
     app.include_router(health.router, prefix="/api/v1")
+    app.include_router(auth.router, prefix="/api/v1")
     app.include_router(documents.router, prefix="/api/v1")
     app.include_router(extractions.router, prefix="/api/v1")
     app.include_router(validation.router, prefix="/api/v1")

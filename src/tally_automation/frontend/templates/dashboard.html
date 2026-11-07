@@ -33,7 +33,19 @@
     <div class="stat"><dt>Ready for vouchers</dt><dd id="stat-ready"></dd></div>
     <div class="stat"><dt>Pending approvals</dt><dd id="stat-approvals"></dd></div>
   </dl>
-  <p class="muted small">Voucher approvals become available in Phase 8.</p>
   <p><a href="/upload">Upload documents</a> · <a href="/processing">View processing status</a> · <a href="/review">Review extracted data</a> · <a href="/duplicates">Manage duplicates</a> · <a href="/tally">TallyPrime</a></p>
+</section>
+
+<section class="card" aria-labelledby="vouchers-heading">
+  <h2 id="vouchers-heading">Vouchers</h2>
+  <div id="voucher-stats-message" role="status" aria-live="polite"></div>
+  <dl class="stat-grid" id="voucher-stats-grid" hidden>
+    <div class="stat"><dt><a href="/vouchers?show=awaiting">Awaiting approval</a></dt><dd id="vstat-awaiting"></dd></div>
+    <div class="stat"><dt><a href="/vouchers?show=approved">Approved, not imported</a></dt><dd id="vstat-approved"></dd></div>
+    <div class="stat"><dt><a href="/vouchers?show=imported">In TallyPrime</a></dt><dd id="vstat-imported"></dd></div>
+    <div class="stat"><dt><a href="/vouchers?show=failed">Import failed</a></dt><dd id="vstat-failed"></dd></div>
+    <div class="stat"><dt><a href="/vouchers?show=uncertain">Import unclear</a></dt><dd id="vstat-unclear"></dd></div>
+    <div class="stat"><dt><a href="/vouchers?show=blocked">Blocked (errors)</a></dt><dd id="vstat-blocked"></dd></div>
+  </dl>
 </section>
 {% endblock %}

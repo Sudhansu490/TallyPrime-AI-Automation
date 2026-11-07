@@ -85,8 +85,9 @@ async function historyParts(id) {
   const items = [
     ...h.approvals.map((a) => ({ at: a.decided_at, text: `${a.decision}` +
       (a.warnings_acknowledged ? ` (${a.warnings_acknowledged} warning(s) acknowledged)` : "") +
-      ` · device ${a.client_address ?? "unknown"}` + (a.note ? ` · “${a.note}”` : "") })),
+      ` · ${a.decided_by ?? "unknown user"}, device ${a.client_address ?? "unknown"}` + (a.note ? ` · “${a.note}”` : "") })),
     ...h.imports.map((i) => ({ at: i.started_at, text: `import attempt ${i.attempt}: ${ATTEMPT[i.status] ?? i.status}` +
+      (i.imported_by ? ` · by ${i.imported_by}` : "") +
       ` · ${i.company_name} at ${i.host}:${i.port}` + (i.tally_master_id ? ` · TallyPrime id ${i.tally_master_id}` : "") +
       (i.verified === true ? " · verified" : i.verified === false ? " · not verified" : "") +
       (i.message ? ` · ${i.message}` : "") })),
@@ -115,6 +116,7 @@ export function voucherBlock(v, { actions = [], showDocument = false } = {}) {
     `${v.company_name} · voucher type ${v.voucher_type_name ?? dash} · party ${v.party_ledger_name ?? dash}` +
     (v.reference ? ` · reference ${v.reference}` : "") +
     ` · marker ${v.marker} · ${v.error_count} error(s), ${v.warning_count} warning(s) · generated ${formatDateTime(v.generated_at)}` +
+    (v.generated_by ? ` by ${v.generated_by}` : "") +
     (v.imported_at ? ` · imported ${formatDateTime(v.imported_at)}` : "") + (v.tally_master_id ? ` (TallyPrime id ${v.tally_master_id})` : "") + " · " })]);
   if (showDocument) meta.append(el("a", { text: `document #${v.document_id}`, attrs: { href: `/generate?document=${v.document_id}` } }));
   block.append(meta);

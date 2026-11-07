@@ -3,6 +3,18 @@
 
 const API_PREFIX = "/api/v1";
 const DEFAULT_TIMEOUT_MS = 15000;
+const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/** The session's CSRF token, rendered into the page by the server (never stored by the browser). */
+function csrfToken() {
+  return document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
+}
+
+/** The session ended (logout elsewhere, idle timeout): go to the login page and come back here afterwards. */
+function toLogin() {
+  const here = window.location.pathname + window.location.search;
+  if (window.location.pathname !== "/login") window.location.assign(`/login?next=${encodeURIComponent(here)}`);
+}
 
 /** Error raised for network failures, timeouts and non-2xx responses. */
 export class ApiError extends Error {
@@ -43,6 +55,7 @@ export async function apiRequest(path, { method = "GET", body, timeoutMs = DEFAU
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const headers = { Accept: "application/json" };
+  if (UNSAFE.has(method)) headers["X-CSRF-Token"] = csrfToken();
   const init = { method, headers, credentials: "same-origin", signal: controller.signal, cache: "no-store" };
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -73,6 +86,10 @@ export async function apiRequest(path, { method = "GET", body, timeoutMs = DEFAU
     }
   }
 
+  if (response.status === 401 && path !== "/auth/login") {
+    toLogin();
+    throw new ApiError("Your session has ended. Please log in again.", { status: 401, body: data });
+  }
   if (!response.ok) {
     const detail = describeDetail(data);
     const message = detail ? `${detail} (HTTP ${response.status})` : `Request failed (HTTP ${response.status}).`;
@@ -105,6 +122,7 @@ export function uploadForm(path, formData, { onProgress, timeoutMs = 300000 } = 
     xhr.responseType = "json";
     xhr.timeout = timeoutMs;
     xhr.setRequestHeader("Accept", "application/json");
+    xhr.setRequestHeader("X-CSRF-Token", csrfToken());
 
     if (onProgress) {
       xhr.upload.addEventListener("progress", (event) => {
@@ -113,6 +131,7 @@ export function uploadForm(path, formData, { onProgress, timeoutMs = 300000 } = 
     }
     xhr.addEventListener("load", () => {
       const data = xhr.response;
+      if (xhr.status === 401) toLogin();
       if (xhr.status >= 200 && xhr.status < 300 && data !== null) {
         resolve(data);
         return;
@@ -127,3 +146,12 @@ export function uploadForm(path, formData, { onProgress, timeoutMs = 300000 } = 
     xhr.send(formData);
   });
 }
+
+// The header's "Log out" button exists on every page that has a user menu.
+document.getElementById("logout")?.addEventListener("click", async () => {
+  try {
+    await apiRequest("/auth/logout", { method: "POST" });
+  } finally {
+    window.location.assign("/login");
+  }
+});

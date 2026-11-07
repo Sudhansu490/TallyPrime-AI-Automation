@@ -102,7 +102,7 @@ def check_importable(session: Session, voucher: GeneratedVoucher, write_enabled:
 
 
 def _claim(factory: sessionmaker[Session], voucher_id: int, write_enabled: bool, client: TallyClient,
-           client_address: str | None) -> Snapshot:
+           client_address: str | None, user_id: int | None) -> Snapshot:
     with transaction(factory) as tx:
         voucher = tx.get(GeneratedVoucher, voucher_id)
         if voucher is None:
@@ -120,7 +120,7 @@ def _claim(factory: sessionmaker[Session], voucher_id: int, write_enabled: bool,
         attempt = VoucherImport(
             voucher_id=voucher_id, attempt=attempt_no, status=AttemptStatus.SENDING, company_name=voucher.company_name,
             host=client.host, port=client.port, xml_sha256=voucher.xml_sha256, client_address=client_address,
-            started_at=utc_now(),
+            imported_by_user_id=user_id, started_at=utc_now(),
         )
         tx.add(attempt)
         tx.flush()
@@ -219,12 +219,12 @@ _FINAL = {
 
 
 def import_voucher(factory: sessionmaker[Session], client: TallyClient, voucher_id: int, *,
-                   write_enabled: bool, client_address: str | None) -> int:
+                   write_enabled: bool, client_address: str | None, user_id: int | None = None) -> int:
     """Import one approved voucher. Returns the attempt id. Raises ``VoucherError`` if it may not be imported."""
     if not _lock.acquire(blocking=False):
         raise VoucherError("import_in_progress", "Another voucher is being imported; try again in a moment.")
     try:
-        snap = _claim(factory, voucher_id, write_enabled, client, client_address)
+        snap = _claim(factory, voucher_id, write_enabled, client, client_address, user_id)
         try:
             outcome = _talk(client, snap)
         except Exception as exc:  # noqa: BLE001 - recorded, never silently ignored

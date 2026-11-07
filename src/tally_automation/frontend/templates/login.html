@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card login-card" aria-labelledby="login-heading">
+  <h1 id="login-heading">Log in</h1>
+  <form id="login-form" autocomplete="on">
+    <label class="block-label" for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" maxlength="64" required autofocus>
+    <label class="block-label" for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" maxlength="256" required>
+    <div id="login-message" role="status" aria-live="polite"></div>
+    <div class="actions"><button type="submit" class="btn" id="login-button">Log in</button></div>
+  </form>
+  <p class="small muted">Accounts are created by an administrator on Computer A. After several wrong passwords the
+    account is locked for a while.</p>
+</section>
+{% endblock %}

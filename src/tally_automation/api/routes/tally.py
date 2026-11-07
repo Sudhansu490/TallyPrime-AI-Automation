@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 
 from tally_automation.api.deps import SessionDep, SettingsDep
+from tally_automation.auth.deps import Reviewer
 from tally_automation.db.models import (
     SyncStatus, TallyCompany, TallyGroup, TallyLedger, TallySyncRun, TallyVoucherType,
 )
@@ -167,7 +168,8 @@ def tally_status(request: Request, session: SessionDep, settings: SettingsDep) -
 
 
 @router.post("/sync", response_model=SyncRunOut, responses={409: {}, 502: {}})
-def tally_sync(body: SyncIn, request: Request, session: SessionDep, settings: SettingsDep) -> SyncRunOut | JSONResponse:
+def tally_sync(body: SyncIn, request: Request, session: SessionDep, settings: SettingsDep,
+               user: Reviewer) -> SyncRunOut | JSONResponse:
     """Retrieve groups, ledgers and voucher types of a loaded company (read-only)."""
     try:
         client = _client(request, settings)
@@ -175,7 +177,7 @@ def tally_sync(body: SyncIn, request: Request, session: SessionDep, settings: Se
         return _error(409, "not_configured", str(exc))
     try:
         with client:
-            run_id = sync_company(request.app.state.session_factory, client, body.company)
+            run_id = sync_company(request.app.state.session_factory, client, body.company, user.id)
     except SyncError as exc:
         status_code = 502 if exc.code == "tally_error" else 409
         return _error(status_code, exc.code, exc.message)

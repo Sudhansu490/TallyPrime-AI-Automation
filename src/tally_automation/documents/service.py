@@ -43,7 +43,8 @@ class DocumentIngestor:
         self.session_factory = session_factory
         self.storage = DocumentStorage(settings.upload_dir)
 
-    def ingest(self, source: BinaryIO, filename: str | None, document_type: DocumentType) -> IngestResult:
+    def ingest(self, source: BinaryIO, filename: str | None, document_type: DocumentType,
+               uploaded_by_user_id: int | None = None) -> IngestResult:
         display_name = sanitize_filename(filename)
         declared = media_type_for_extension(display_name, document_type)
         temp_path, sha256, size = self.storage.receive(source, self.settings.max_upload_size_bytes)
@@ -58,7 +59,7 @@ class DocumentIngestor:
         finally:
             self.storage.discard(temp_path)
 
-        args = (sha256, size, relative_path, validated, display_name, document_type)
+        args = (sha256, size, relative_path, validated, display_name, document_type, uploaded_by_user_id)
         try:
             try:
                 result = self._record(*args)
@@ -85,7 +86,7 @@ class DocumentIngestor:
 
     def _record(
         self, sha256: str, size: int, relative_path: str, validated: ValidatedFile,
-        display_name: str, document_type: DocumentType,
+        display_name: str, document_type: DocumentType, uploaded_by_user_id: int | None,
     ) -> IngestResult:
         with transaction(self.session_factory) as session:
             stored = session.scalar(select(DocumentFile).where(DocumentFile.sha256 == sha256))
@@ -102,6 +103,7 @@ class DocumentIngestor:
                     original_filename=display_name,
                     status=DocumentStatus.DUPLICATE,
                     duplicate_of_id=original.id,
+                    uploaded_by_user_id=uploaded_by_user_id,
                 )
                 session.add(duplicate)
                 session.flush()
@@ -113,7 +115,7 @@ class DocumentIngestor:
             )
             document = Document(
                 file=stored, document_type=document_type, original_filename=display_name,
-                status=DocumentStatus.QUEUED,
+                status=DocumentStatus.QUEUED, uploaded_by_user_id=uploaded_by_user_id,
             )
             session.add_all([stored, document, ProcessingJob(document=document, attempt=1)])
             session.flush()

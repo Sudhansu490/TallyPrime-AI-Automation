@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h1>Account</h1></div>
+
+<section class="card" aria-labelledby="me-heading">
+  <h2 id="me-heading">Signed in as</h2>
+  <dl class="field-facts" id="me"></dl>
+  <p class="small muted">What each role may do: <strong>viewer</strong> reads everything; <strong>reviewer</strong> also
+    uploads, corrects data, decides duplicates, retrieves TallyPrime masters and generates vouchers;
+    <strong>approver</strong> also approves vouchers and imports them into TallyPrime; <strong>admin</strong> may do
+    everything. Accounts and roles are managed by an administrator on Computer A.</p>
+</section>
+
+<section class="card" aria-labelledby="password-heading">
+  <h2 id="password-heading">Change password</h2>
+  <form id="password-form">
+    <label class="block-label" for="current-password">Current password</label>
+    <input type="password" id="current-password" autocomplete="current-password" maxlength="256" required>
+    <label class="block-label" for="new-password">New password</label>
+    <input type="password" id="new-password" autocomplete="new-password" maxlength="256" required>
+    <label class="block-label" for="repeat-password">New password again</label>
+    <input type="password" id="repeat-password" autocomplete="new-password" maxlength="256" required>
+    <div id="password-message" role="status" aria-live="polite"></div>
+    <div class="actions"><button type="submit" class="btn" id="password-button">Change password</button></div>
+  </form>
+  <p class="small muted">Changing the password logs out every other browser using this account.</p>
+</section>
+{% endblock %}

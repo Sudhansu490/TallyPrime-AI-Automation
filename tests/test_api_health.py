@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
+from auth_helpers import login_as
 from tally_automation import __version__
 from tally_automation.api.main import create_app
 from tally_automation.config import Environment, Settings
@@ -33,9 +34,11 @@ def test_health_reports_database_failure_without_leaking_details(
     assert "secret" not in response.text
 
 
-def test_docs_disabled_in_production(settings: Settings) -> None:
+def test_docs_disabled_in_production(settings: Settings, migrated_engine) -> None:
     production = settings.model_copy(update={"app_env": Environment.PRODUCTION})
-    with TestClient(create_app(production), base_url="http://127.0.0.1") as client:
+    # A real client address: production does not admit the test client's placeholder host.
+    with TestClient(create_app(production), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
+        login_as(client)
         assert client.get("/docs").status_code == 404
         assert client.get("/openapi.json").status_code == 404
         assert client.get("/api/v1/health").status_code == 200

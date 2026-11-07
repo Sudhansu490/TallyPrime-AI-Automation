@@ -84,9 +84,28 @@ async function loadStats() {
   }
 }
 
+async function loadVoucherStats() {
+  const message = document.getElementById("voucher-stats-message");
+  const grid = document.getElementById("voucher-stats-grid");
+  try {
+    const s = await api.get("/vouchers/stats");
+    for (const [id, value] of [["vstat-awaiting", s.awaiting_approval], ["vstat-approved", s.approved_not_imported],
+      ["vstat-imported", s.imported], ["vstat-failed", s.import_failed], ["vstat-unclear", s.import_unclear],
+      ["vstat-blocked", s.blocked]]) {
+      document.getElementById(id).textContent = String(value);
+    }
+    clear(message);
+    grid.hidden = false;
+  } catch (error) {
+    grid.hidden = true;
+    showError(message, error);
+  }
+}
+
 function refreshAll() {
   loadHealth();
   loadStats();
+  loadVoucherStats();
 }
 
 document.getElementById("refresh-health").addEventListener("click", refreshAll);

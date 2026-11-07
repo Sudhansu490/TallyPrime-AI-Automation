@@ -12,6 +12,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from tally_automation.api.deps import SessionDep
+from tally_automation.auth.deps import Reviewer
+from tally_automation.auth.service import user_names
 from tally_automation.db.models import (
     BankTransaction, Document, DocumentStatus, DocumentType, DuplicateKind, DuplicateMatch, Invoice,
     MatchStatus, MatchStrength, ProcessingJob, ReviewDecision, StageStatus, ValidationOutcome, ValidationResult,
@@ -70,6 +72,7 @@ class ReviewOut(BaseModel):
     decision: ReviewDecision
     note: str | None
     reviewed_by_user_id: int | None
+    reviewed_by: str | None
     client_address: str | None
     reviewed_at: datetime
 
@@ -192,6 +195,7 @@ def _matches_out(session: Session, matches: list[DuplicateMatch]) -> list[MatchO
             return f"Transaction record #{entity_id}"
         return f"Transaction {txn.sequence}" + (f" (p. {txn.page})" if txn.page else "")
 
+    names = user_names(session, {r.reviewed_by_user_id for m in matches for r in m.reviews})
     out: list[MatchOut] = []
     for m in matches:
         evidence = m.evidence
@@ -212,7 +216,7 @@ def _matches_out(session: Session, matches: list[DuplicateMatch]) -> list[MatchO
             resolution_note=m.resolution_note, resolved_at=m.resolved_at, created_at=m.created_at,
             reviews=[ReviewOut(
                 decision=r.decision, note=r.note, reviewed_by_user_id=r.reviewed_by_user_id,
-                client_address=r.client_address, reviewed_at=r.reviewed_at,
+                reviewed_by=names.get(r.reviewed_by_user_id), client_address=r.client_address, reviewed_at=r.reviewed_at,
             ) for r in m.reviews],
         ))
     return out
@@ -245,7 +249,7 @@ def get_validation(document_id: int, session: SessionDep) -> ValidationOut | JSO
 @router.post(
     "/documents/{document_id}/validate", response_model=ValidationOut, responses={404: {}, 409: {}},
 )
-def run_validation(document_id: int, request: Request, session: SessionDep) -> ValidationOut | JSONResponse:
+def run_validation(document_id: int, request: Request, session: SessionDep, user: Reviewer) -> ValidationOut | JSONResponse:
     """Re-run validation and duplicate detection on the current extraction (no LLM call)."""
     factory = request.app.state.session_factory
     try:
@@ -306,12 +310,12 @@ def list_duplicates(
 
 
 @router.post("/duplicates/{match_id}/review", response_model=MatchOut, responses={404: {}, 409: {}})
-def review_duplicate(match_id: int, body: ReviewIn, request: Request, session: SessionDep) -> MatchOut | JSONResponse:
+def review_duplicate(match_id: int, body: ReviewIn, request: Request, session: SessionDep, user: Reviewer) -> MatchOut | JSONResponse:
     """Record a decision: ``duplicate`` (the later record is a copy), ``not_duplicate``, or ``reopened``."""
     client = request.client.host if request.client else None
     try:
         with transaction(request.app.state.session_factory) as tx:
-            review_match(tx, match_id, body.decision, note=body.note, client_address=client)
+            review_match(tx, match_id, body.decision, note=body.note, client_address=client, user_id=user.id)
     except ValidationServiceError as exc:
         return _error(_ERROR_STATUS.get(exc.code, 409), exc)
     session.expire_all()
@@ -319,7 +323,7 @@ def review_duplicate(match_id: int, body: ReviewIn, request: Request, session: S
 
 
 @router.post("/duplicates/review", response_model=list[MatchOut], responses={404: {}, 409: {}})
-def review_duplicates(body: BulkReviewIn, request: Request, session: SessionDep) -> list[MatchOut] | JSONResponse:
+def review_duplicates(body: BulkReviewIn, request: Request, session: SessionDep, user: Reviewer) -> list[MatchOut] | JSONResponse:
     """Apply one decision to several matches (e.g. all transactions of two overlapping
     statements). All or nothing: if any match cannot take the decision, none is changed."""
     client = request.client.host if request.client else None
@@ -327,7 +331,7 @@ def review_duplicates(body: BulkReviewIn, request: Request, session: SessionDep)
     try:
         with transaction(request.app.state.session_factory) as tx:
             for match_id in ids:
-                review_match(tx, match_id, body.decision, note=body.note, client_address=client)
+                review_match(tx, match_id, body.decision, note=body.note, client_address=client, user_id=user.id)
     except ValidationServiceError as exc:
         return _error(_ERROR_STATUS.get(exc.code, 409), exc)
     session.expire_all()

@@ -394,7 +394,7 @@ def _finish(draft: Draft | None, company_name: str, checks: list[Check]) -> tupl
 def _store(session: Session, *, source: Source, source_kind: VoucherSource, source_id: int, source_digest: str,
            company: TallyCompany, kind: VoucherKind, voucher_type: str | None, draft: Draft | None,
            xml: str | None, checks: list[Check], mapping: dict[str, Any], marker_text: str,
-           client_address: str | None) -> GeneratedVoucher:
+           client_address: str | None, user_id: int | None = None) -> GeneratedVoucher:
     errors, warnings = summarize(checks)
     ready = errors == 0 and xml is not None
     _supersede(session, source_kind, source_id)
@@ -410,7 +410,7 @@ def _store(session: Session, *, source: Source, source_kind: VoucherSource, sour
         xml_sha256=hashlib.sha256(xml.encode()).hexdigest() if xml else None,
         status=VoucherStatus.READY if ready else VoucherStatus.BLOCKED,
         error_count=errors, warning_count=warnings, checks=[c.to_json() for c in checks],
-        rules_version=RULES_VERSION, client_address=client_address,
+        rules_version=RULES_VERSION, client_address=client_address, generated_by_user_id=user_id,
     )
     session.add(voucher)
     session.flush()
@@ -423,7 +423,7 @@ def _require_eligible(e: Eligibility) -> None:
 
 
 def generate_invoice(session: Session, document_id: int, company_guid: str, choice: InvoiceChoice,
-                     *, client_address: str | None) -> list[GeneratedVoucher]:
+                     *, client_address: str | None, user_id: int | None = None) -> list[GeneratedVoucher]:
     source = _source(session, document_id)
     if source.invoice is None:
         raise VoucherError("wrong_type", "This document is not a purchase invoice.")
@@ -464,7 +464,7 @@ def generate_invoice(session: Session, document_id: int, company_guid: str, choi
         session, source=source, source_kind=VoucherSource.INVOICE, source_id=invoice.id,
         source_digest=invoice_digest(invoice), company=company, kind=VoucherKind.PURCHASE,
         voucher_type=choice.voucher_type, draft=draft, xml=xml, checks=checks, mapping=mapping,
-        marker_text=mark, client_address=client_address,
+        marker_text=mark, client_address=client_address, user_id=user_id,
     )
     _remember(session, company.guid, MappingPurpose.PARTY, _party_key(plan), ledgers.party.guid, ledgers.party.name)
     for key, ledger in ledgers.purchase.items():
@@ -480,7 +480,7 @@ def generate_invoice(session: Session, document_id: int, company_guid: str, choi
 
 
 def generate_statement(session: Session, document_id: int, company_guid: str, choice: StatementChoice,
-                       *, client_address: str | None) -> list[GeneratedVoucher]:
+                       *, client_address: str | None, user_id: int | None = None) -> list[GeneratedVoucher]:
     source = _source(session, document_id)
     if source.statement is None:
         raise VoucherError("wrong_type", "This document is not a bank statement.")
@@ -522,7 +522,7 @@ def generate_statement(session: Session, document_id: int, company_guid: str, ch
             source_digest=transaction_digest(statement, transaction), company=company, kind=kind,
             voucher_type=voucher_type, draft=draft, xml=xml, checks=checks,
             mapping={"bank": bank.guid, "counter": counter.guid, "voucher_type": voucher_type},
-            marker_text=mark, client_address=client_address,
+            marker_text=mark, client_address=client_address, user_id=user_id,
         ))
         _remember(session, company.guid, MappingPurpose.COUNTER, description_key(plan.description), counter.guid, counter.name)
         _remember(session, company.guid, MappingPurpose.VOUCHER_TYPE, kind.value, None, voucher_type)

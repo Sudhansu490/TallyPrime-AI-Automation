@@ -130,7 +130,7 @@ def test_edit_field_is_reparsed_audited_and_synced(client: TestClient, invoice_i
         assert session.get(Invoice, invoice_id_db).grand_total is None
         edits = session.scalars(select(FieldEdit).order_by(FieldEdit.id)).all()
         assert [(e.old_raw, e.new_raw) for e in edits] == [("1,180.00", "1,190.00"), ("1,190.00", "1.190.00")]
-        assert edits[0].client_address == "testclient" and edits[0].edited_by_user_id is None
+        assert edits[0].client_address == "testclient" and edits[0].edited_by_user_id is not None
 
     history = client.get(f"/api/v1/extractions/invoice/{invoice_id_db}/edits").json()
     assert [h["reason"] for h in history] == ["synthetic correction", None]

@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
+  <meta name="csrf-token" content="{{ csrf_token }}">
   <title>{{ title }} · {{ app_name }}</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/css/app.css?v={{ version }}">
@@ -12,6 +13,7 @@
 <body>
   <header class="topbar">
     <a class="brand" href="/">{{ app_name }}</a>
+    {% if user %}
     <nav class="nav" aria-label="Main">
       <ul>
         {% for item in nav_items %}
@@ -25,6 +27,12 @@
         {% endfor %}
       </ul>
     </nav>
+    <div class="user-menu">
+      <span class="small" title="Signed in as {{ user.username }}">{{ user.display_name }} <span class="badge badge-neutral">{{ user.role.value }}</span></span>
+      <a class="small" href="/account">Account</a>
+      <button type="button" class="btn btn-secondary btn-small" id="logout">Log out</button>
+    </div>
+    {% endif %}
   </header>
 
   <main class="container" id="main">

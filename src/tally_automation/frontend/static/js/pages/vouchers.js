@@ -130,7 +130,7 @@ function button(text, handler, { secondary = false, disabled = false, title = ""
 
 function actionsFor(v) {
   const p = state.permissions;
-  if (!p?.local || v.status === "superseded") return [];
+  if (!p?.can_approve || v.status === "superseded") return [];
   const out = [];
   const stale = v.stale_reasons.length > 0;
   const locked = ["importing", "imported", "uncertain"].includes(v.import_status);
@@ -152,7 +152,7 @@ async function loadPermissions() {
   try {
     const p = await api.get("/vouchers/permissions");
     state.permissions = p;
-    showMessage($("permissions"), p.local && p.write_enabled ? "success" : "warning", p.message);
+    showMessage($("permissions"), p.can_approve && p.write_enabled ? "success" : "info", p.message);
   } catch (error) {
     showError($("permissions"), error);
   }

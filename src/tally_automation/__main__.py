@@ -1,6 +1,8 @@
-"""Entry point for ``python -m tally_automation``."""
+"""Entry point for ``python -m tally_automation`` (server, or ``users …`` management)."""
 
-from tally_automation.server import run
+import sys
+
+from tally_automation.cli import main
 
 if __name__ == "__main__":
-    run()
+    sys.exit(main())

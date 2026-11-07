@@ -250,7 +250,7 @@ async function loadHistory(entity, id, fieldName) {
     const edits = (await api.get(`/extractions/${entity}/${id}/edits`)).filter((e) => e.field_name === fieldName);
     if (!edits.length) list.append(el("li", { className: "muted", text: "No edits yet." }));
     for (const e of edits) {
-      const who = e.edited_by_user_id ? `user #${e.edited_by_user_id}` : `device ${e.client_address ?? "unknown"} (no login yet)`;
+      const who = e.edited_by ?? `device ${e.client_address ?? "unknown"} (before login existed)`;
       list.append(el("li", {
         text: `${formatDateTime(e.edited_at)} · ${who}: “${e.old_raw ?? "—"}” → “${e.new_raw ?? "—"}”` + (e.reason ? ` · ${e.reason}` : ""),
       }));

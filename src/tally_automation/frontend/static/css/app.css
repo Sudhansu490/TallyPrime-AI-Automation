@@ -280,4 +280,8 @@ dialog input[type="text"] { width: 100%; font: inherit; padding: 0.4rem 0.5rem; 
 .voucher-actions { margin: 0.5rem 0; }
 .history { margin: 0.25rem 0 0; padding-left: 1.1rem; }
 .check-label { display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.75rem 0; }
+/* Login and user menu (Phase 9) */
+.user-menu { margin-left: auto; display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.login-card { max-width: 26rem; margin: 3rem auto; }
+.login-card input, #password-form input { width: 100%; font: inherit; padding: 0.45rem 0.55rem; border: 1px solid var(--border); border-radius: var(--radius); }
 pre.xml { max-height: 28rem; overflow: auto; background: var(--neutral-bg); padding: 0.75rem; border-radius: var(--radius); font-size: 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere; }
