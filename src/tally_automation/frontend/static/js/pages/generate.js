@@ -7,15 +7,12 @@ import { api } from "../api.js";
 import {
   DOCUMENT_TYPE_LABELS, clear, el, formatDate, formatDateTime, formatINR, showError, showMessage,
 } from "../ui.js";
+import { KIND_LABELS, checkItem, renderVouchers } from "../voucher_view.js";
 
 const $ = (id) => document.getElementById(id);
 const state = { documentId: null, companyGuid: null, setup: null, pickers: {}, rows: [] };
 const dash = "—";
 
-const KIND_LABELS = { purchase: "Purchase", payment: "Payment", receipt: "Receipt", contra: "Contra" };
-const STATUS = { ready: ["Ready for approval", "ok"], blocked: ["Blocked", "error"], superseded: ["Replaced", "neutral"] };
-const SEVERITY = { error: ["Error", "error"], warning: ["Warning", "warning"], info: ["Info", "neutral"] };
-const CATEGORY = { extraction: "Extraction", accounting: "Accounting", tally: "TallyPrime" };
 
 // ---- Ledger picker -------------------------------------------------------------------
 
@@ -67,37 +64,6 @@ function voucherTypeSelect(label, options = []) {
   if (!options.length) select.append(option("No active voucher type of this kind", ""));
   for (const o of options) select.append(option(`${o.name} — ${o.reason}`, o.name));
   return select;
-}
-
-// ---- Checks ------------------------------------------------------------------------------
-
-function checkItem(check) {
-  const [label, kind] = check.passed ? ["OK", "ok"] : SEVERITY[check.severity];
-  const item = el("li", { className: `check check-${check.passed ? "passed" : check.severity}` }, [
-    el("span", { className: `badge badge-${kind}`, text: label }),
-    el("span", { className: "check-category small muted", text: CATEGORY[check.category] ?? check.category }),
-    el("span", { text: check.message }),
-  ]);
-  const numbers = [];
-  if (check.calculated !== null) numbers.push(`calculated ${/^-?\d/.test(check.calculated) ? formatINR(check.calculated) : check.calculated}`);
-  if (check.printed !== null) numbers.push(`on the document ${/^-?\d/.test(check.printed) ? formatINR(check.printed) : check.printed}`);
-  if (check.difference !== null && !check.passed) numbers.push(`difference ${formatINR(check.difference)}`);
-  if (numbers.length) item.append(el("div", { className: "small check-numbers", text: numbers.join(" · ") }));
-  return item;
-}
-
-function checkLists(checks) {
-  const failing = checks.filter((c) => !c.passed && c.severity !== "info");
-  const order = { error: 0, warning: 1 };
-  failing.sort((a, b) => order[a.severity] - order[b.severity]);
-  const rest = checks.filter((c) => c.passed || c.severity === "info");
-  const parts = [];
-  if (failing.length) parts.push(el("ul", { className: "check-list" }, failing.map(checkItem)));
-  parts.push(el("details", {}, [
-    el("summary", { className: "small", text: `Checks that passed or are for information (${rest.length})` }),
-    el("ul", { className: "check-list" }, rest.map(checkItem)),
-  ]));
-  return parts;
 }
 
 // ---- Setup ---------------------------------------------------------------------------------
@@ -255,7 +221,8 @@ async function generate(event) {
     const vouchers = await api.post(`/documents/${state.documentId}/vouchers`, { company_guid: state.companyGuid, ...body });
     const ready = vouchers.filter((v) => v.status === "ready").length;
     showMessage($("generate-message"), ready === vouchers.length ? "success" : "warning",
-      `Generated ${vouchers.length} voucher(s): ${ready} ready for approval, ${vouchers.length - ready} blocked. Nothing was sent to TallyPrime.`);
+      `Generated ${vouchers.length} voucher(s): ${ready} ready for approval, ${vouchers.length - ready} blocked. ` +
+      "Nothing was sent to TallyPrime. Approve and import them on the Vouchers page.");
     await loadVouchers();
     $("vouchers-card").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
@@ -267,64 +234,14 @@ async function generate(event) {
 
 // ---- Generated vouchers --------------------------------------------------------------------------
 
-function entriesTable(entries) {
-  return el("div", { className: "table-wrap" }, [el("table", { className: "table" }, [
-    el("thead", {}, [el("tr", {}, ["Ledger", "Role", "Debit", "Credit", "Bill"].map((h) => el("th", { text: h })))]),
-    el("tbody", {}, entries.map((e) => el("tr", {}, [
-      el("td", { text: e.ledger }), el("td", { className: "small muted", text: e.role }),
-      el("td", { className: "num", text: e.debit ? formatINR(e.debit) : "" }),
-      el("td", { className: "num", text: e.credit ? formatINR(e.credit) : "" }),
-      el("td", { className: "small", text: e.bill ? `${e.bill.type}${e.bill.name ? ` ${e.bill.name}` : ""}` : "" }),
-    ]))),
-  ])]);
-}
-
-function voucherBlock(v) {
-  const [label, kind] = STATUS[v.status];
-  const block = el("article", { className: "voucher" });
-  block.append(el("h3", {}, [
-    el("span", { className: `badge badge-${kind}`, text: label }),
-    el("span", { text: `${KIND_LABELS[v.voucher_kind]} · ${v.source_label} · ${formatDate(v.voucher_date)} · ${formatINR(v.amount)}` }),
-  ]));
-  block.append(el("p", { className: "small muted", text:
-    `Voucher type ${v.voucher_type_name ?? dash} · party ${v.party_ledger_name ?? dash}` +
-    (v.reference ? ` · reference ${v.reference}` : "") +
-    ` · marker ${v.marker} · ${v.error_count} error(s), ${v.warning_count} warning(s) · generated ${formatDateTime(v.generated_at)}` +
-    (v.client_address ? ` from ${v.client_address}` : "") }));
-  if (v.stale_reasons.length && v.status !== "superseded") {
-    block.append(el("div", { className: "alert alert-warning small" }, [
-      el("strong", { text: "Out of date: " }), el("span", { text: v.stale_reasons.join(" ") }),
-    ]));
-  }
-  if (v.narration) block.append(el("p", { className: "small", text: `Narration: ${v.narration}` }));
-  if (v.entries.length) block.append(entriesTable(v.entries));
-  block.append(...checkLists(v.checks));
-  const xmlDetails = el("details", {}, [el("summary", { className: "small", text: "Import XML (not sent)" })]);
-  let loaded = false;
-  xmlDetails.addEventListener("toggle", async () => {
-    if (!xmlDetails.open || loaded) return;
-    loaded = true;
-    try {
-      const detail = await api.get(`/vouchers/${v.id}`);
-      xmlDetails.append(el("pre", { className: "xml", text: detail.xml ?? "No XML: the voucher could not be built." }));
-      if (detail.xml_sha256) xmlDetails.append(el("p", { className: "small muted", text: `SHA-256 ${detail.xml_sha256}` }));
-    } catch (error) {
-      xmlDetails.append(el("p", { className: "error-text", text: error.message }));
-    }
-  });
-  block.append(xmlDetails);
-  return block;
-}
-
 async function loadVouchers() {
   const container = $("vouchers");
   clear($("vouchers-message"));
   try {
     const all = $("show-superseded").checked;
     const vouchers = await api.get(`/documents/${state.documentId}/vouchers${all ? "?include_superseded=true" : ""}`);
-    clear(container);
-    if (!vouchers.length) container.append(el("p", { className: "muted", text: "No vouchers generated for this document yet." }));
-    for (const v of vouchers) container.append(voucherBlock(v));
+    renderVouchers(container, vouchers, {});
+    if (!vouchers.length) container.firstChild.textContent = "No vouchers generated for this document yet.";
     $("vouchers-card").hidden = false;
   } catch (error) {
     showError($("vouchers-message"), error);

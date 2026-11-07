@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>Voucher review</h1>
+  <form class="actions" id="filters">
+    <label class="inline-label">Show
+      <select id="filter" aria-label="Vouchers to show">
+        <option value="awaiting">Awaiting approval</option>
+        <option value="approved">Approved, not imported</option>
+        <option value="failed">Import failed</option>
+        <option value="uncertain">Import unclear</option>
+        <option value="imported">In TallyPrime</option>
+        <option value="rejected">Rejected</option>
+        <option value="blocked">Blocked (errors)</option>
+        <option value="all">All current vouchers</option>
+      </select>
+    </label>
+    <button type="button" class="btn btn-secondary" id="reload">Reload</button>
+  </form>
+</div>
+
+<div id="permissions" role="status" aria-live="polite"></div>
+<p class="alert alert-info small">
+  Approving records your decision for exactly this voucher's XML; it changes nothing in TallyPrime.
+  <strong>Import</strong> is the only step that writes to TallyPrime: it first checks that the voucher is not
+  already there (by its marker), then creates it and reads it back to verify it.
+</p>
+
+<div id="page-message" role="status" aria-live="polite"></div>
+<section class="card" aria-labelledby="list-heading">
+  <h2 id="list-heading" class="visually-hidden">Vouchers</h2>
+  <div id="vouchers"></div>
+  <div class="actions"><button type="button" class="btn btn-secondary btn-small" id="more" hidden>Show more</button></div>
+</section>
+
+<dialog id="action-dialog" aria-labelledby="action-title">
+  <form method="dialog" id="action-form">
+    <h2 id="action-title"></h2>
+    <div id="action-body"></div>
+    <label class="check-label" id="ack-wrap" hidden><input type="checkbox" id="ack"> <span id="ack-text"></span></label>
+    <label class="block-label" for="action-note" id="note-label">Note</label>
+    <input type="text" id="action-note" autocomplete="off" maxlength="500">
+    <div id="action-message" role="status" aria-live="polite"></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-secondary" id="action-cancel">Cancel</button>
+      <button type="submit" class="btn" id="action-confirm"></button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}

@@ -75,7 +75,7 @@ async function loadStats() {
     show("stat-possible-duplicates", stats.possible_duplicates);
     show("stat-validation-failed", stats.validation_failed);
     show("stat-ready", stats.ready_for_vouchers);
-    show("stat-approvals", stats.pending_approvals); // null until Phase 8: shown as "—", never as 0
+    show("stat-approvals", stats.pending_approvals);
     clear(message);
     grid.hidden = false;
   } catch (error) {

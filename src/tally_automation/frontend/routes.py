@@ -49,7 +49,7 @@ NAV_ITEMS: tuple[NavItem, ...] = (
     NavItem("Duplicates", "/duplicates", 5, True),
     NavItem("TallyPrime", "/tally", 6, True),
     NavItem("Generate", "/generate", 7, True),
-    NavItem("Vouchers", "/vouchers", 8, False),
+    NavItem("Vouchers", "/vouchers", 8, True),
 )
 
 
@@ -97,6 +97,11 @@ def duplicates(request: Request) -> HTMLResponse:
 @router.get("/tally", response_class=HTMLResponse)
 def tally(request: Request) -> HTMLResponse:
     return _render(request, "tally.html", title="TallyPrime integration", page_script="pages/tally.js")
+
+
+@router.get("/vouchers", response_class=HTMLResponse)
+def vouchers(request: Request) -> HTMLResponse:
+    return _render(request, "vouchers.html", title="Voucher review", page_script="pages/vouchers.js")
 
 
 @router.get("/generate", response_class=HTMLResponse)

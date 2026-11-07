@@ -14,6 +14,9 @@ Observed behaviour of TallyPrime 6.2 that parsing must handle:
   an empty result as a failure where data must exist.
 * Errors come back as ``<LINEERROR>``, as a bare ``<RESPONSE>`` text, as
   ``<STATUS>0</STATUS>`` / ``-1``, or as an empty body.
+* Vouchers with ledger entries contain tags with an undeclared ``UDF:``
+  namespace prefix (user-defined fields), which strict parsers reject. Prefixes
+  are rewritten to plain tag names (``UDF:X`` → ``UDF.X``) before parsing.
 """
 
 from __future__ import annotations
@@ -27,6 +30,9 @@ _CONTROL_REFS = re.compile(r"&#(?:x0*[0-8bBcCeEfF]|x0*1[0-9a-fA-F]|0*[0-8]|0*1[1
 _CONTROL_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _COLLECTION_ID = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,40}$")
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,40}$")
+_TAG = re.compile(r"<[^<>]+>")
+_PREFIXED_TAG = re.compile(r"(</?)([A-Za-z_][\w.-]*):(?=[A-Za-z_])")
+_PREFIXED_ATTR = re.compile(r"(\s)(?!xmlns:)([A-Za-z_][\w.-]*):([A-Za-z_][\w.-]*\s*=)")
 
 # Words that must never appear in a request body. Tally imports and alters data
 # through ``<TALLYREQUEST>Import</TALLYREQUEST>``, ``<IMPORTDATA>`` and
@@ -103,6 +109,7 @@ def parse_response(text: str) -> ParsedResponse:
         raise TallyResponseError("TallyPrime's response contained a DTD and was refused.")
     cleaned, refs = _CONTROL_REFS.subn("", text)
     cleaned, chars = _CONTROL_CHARS.subn("", cleaned)
+    cleaned = unprefix(cleaned)
     try:
         root = ET.fromstring(cleaned)
     except ET.ParseError as exc:
@@ -117,6 +124,15 @@ def parse_response(text: str) -> ParsedResponse:
     if status and status != "1":
         raise TallyResponseError(f"TallyPrime reported status {status} without data.")
     return ParsedResponse(root, refs + chars)
+
+
+def unprefix(text: str) -> str:
+    """Rewrite namespace prefixes on tags and attributes (``UDF:X`` → ``UDF.X``); xmlns declarations stay."""
+    # Attributes are rewritten only inside tags, never in text (a narration may contain "ref:abc=").
+    def fix(match: re.Match[str]) -> str:
+        return _PREFIXED_ATTR.sub(r"\1\2.\3", _PREFIXED_TAG.sub(r"\1\2.", match.group()))
+
+    return _TAG.sub(fix, text)
 
 
 # ---- Value helpers ---------------------------------------------------------------------

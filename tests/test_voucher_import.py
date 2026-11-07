@@ -1,0 +1,257 @@
+"""Approval and controlled import (Phase 8). SYNTHETIC documents, SYNTHETIC fake TallyPrime only."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import Engine
+
+from tally_fakes import COMPANY, LEDGERS, FakeTally
+from tally_automation.api.main import create_app
+from tally_automation.config import Settings
+from tally_automation.db.models import (
+    AttemptStatus, GeneratedVoucher, ImportStatus, VoucherImport,
+)
+from tally_automation.tally.client import TallyClient
+from tally_automation.tally.importing import assert_voucher_import, parse_import_response, parse_marked_vouchers
+from tally_automation.tally.xmlio import TallyResponseError, TallyWriteBlocked, assert_read_only
+from tally_automation.vouchers.importer import recover_interrupted_imports
+from test_voucher_api import EXTRA_LEDGERS, VOUCHER_TYPES, generate, invoice_choice, invoice_document
+
+
+@pytest.fixture
+def local(settings: Settings, migrated_engine: Engine) -> Iterator[TestClient]:
+    """A browser on Computer A itself (loopback client address)."""
+    with TestClient(create_app(settings), base_url="http://127.0.0.1", client=("127.0.0.1", 50123)) as client:
+        yield client
+
+
+@pytest.fixture
+def tally(local: TestClient) -> FakeTally:
+    fake = FakeTally()
+    fake.overrides["Ledger"] = LEDGERS.replace("   </COLLECTION>", EXTRA_LEDGERS + "   </COLLECTION>")
+    fake.overrides["VoucherType"] = VOUCHER_TYPES
+    local.app.state.settings.tally_host = "127.0.0.1"
+    local.app.state.tally_transport = fake.transport
+    assert local.post("/api/v1/tally/sync", json={"company": COMPANY}).status_code == 200
+    fake.requests.clear()
+    return fake
+
+
+def ready_voucher(client: TestClient) -> dict:
+    document_id = invoice_document(client)
+    [voucher] = generate(client, document_id, invoice=invoice_choice()).json()
+    assert voucher["status"] == "ready", voucher
+    return voucher
+
+
+def approve(client: TestClient, voucher_id: int, **body):
+    return client.post(f"/api/v1/vouchers/{voucher_id}/approve", json={"acknowledge_warnings": True, **body})
+
+
+def do_import(client: TestClient, voucher_id: int):
+    return client.post(f"/api/v1/vouchers/{voucher_id}/import", json={"confirm": True})
+
+
+def enable_writes(client: TestClient) -> None:
+    client.app.state.settings.tally_write_enabled = True
+
+
+# ---- Who may decide ---------------------------------------------------------------------------
+
+def test_decisions_and_imports_only_from_computer_a(client: TestClient, local: TestClient, tally: FakeTally) -> None:
+    voucher = ready_voucher(local)
+    for path, body in (("approve", {}), ("reject", {"note": "x"}), ("revoke", {}), ("import", {"confirm": True})):
+        response = client.post(f"/api/v1/vouchers/{voucher['id']}/{path}", json=body)   # a tailnet device
+        assert response.status_code == 403 and response.json()["code"] == "not_local"
+    assert client.get("/api/v1/vouchers/permissions").json()["local"] is False
+    permissions = local.get("/api/v1/vouchers/permissions").json()
+    assert (permissions["local"], permissions["write_enabled"]) == (True, False)
+
+
+def test_approval_needs_acknowledged_warnings_and_is_tied_to_the_xml(local: TestClient, tally: FakeTally) -> None:
+    voucher = ready_voucher(local)
+    assert voucher["warning_count"] >= 1        # the synthetic supplier is intra-state but charges IGST
+    refused = approve(local, voucher["id"], acknowledge_warnings=False)
+    assert refused.status_code == 422 and refused.json()["code"] == "warnings_not_acknowledged"
+    approved = approve(local, voucher["id"], note="checked").json()
+    assert approved["approval_status"] == "approved" and approved["import_status"] == "not_imported"
+    assert approve(local, voucher["id"]).json()["code"] == "already_approved"
+    assert local.get("/api/v1/documents/stats").json()["pending_approvals"] == 0
+
+    # Generating again replaces the voucher and withdraws the approval of the old XML.
+    [again] = generate(local, voucher["document_id"], invoice=invoice_choice()).json()
+    assert again["approval_status"] == "pending"
+    history = local.get(f"/api/v1/vouchers/{voucher['id']}/history").json()
+    assert [a["decision"] for a in history["approvals"]] == ["approved", "revoked"]
+    assert history["approvals"][0]["client_address"] == "127.0.0.1"
+    assert approve(local, voucher["id"]).json()["code"] == "superseded"
+    assert local.get("/api/v1/documents/stats").json()["pending_approvals"] == 1
+
+
+def test_reject_revoke_and_stale_vouchers(local: TestClient, tally: FakeTally) -> None:
+    voucher = ready_voucher(local)
+    assert local.post(f"/api/v1/vouchers/{voucher['id']}/reject", json={"note": ""}).status_code == 422
+    rejected = local.post(f"/api/v1/vouchers/{voucher['id']}/reject", json={"note": "wrong purchase ledger"}).json()
+    assert rejected["approval_status"] == "rejected"
+    assert approve(local, voucher["id"]).json()["approval_status"] == "approved"   # a person may change their mind
+    assert local.post(f"/api/v1/vouchers/{voucher['id']}/revoke", json={}).json()["approval_status"] == "pending"
+
+    invoice_id = local.get(f"/api/v1/documents/{voucher['document_id']}/extraction").json()["data"]["id"]
+    local.patch(f"/api/v1/extractions/invoice/{invoice_id}/fields/purchase_order_number", json={"value": "PO-1"})
+    stale = approve(local, voucher["id"])
+    assert stale.status_code == 409 and stale.json()["code"] == "stale"
+
+
+# ---- Import --------------------------------------------------------------------------------------
+
+def test_import_requires_write_enabled_and_approval(local: TestClient, tally: FakeTally) -> None:
+    voucher = ready_voucher(local)
+    approve(local, voucher["id"])
+    disabled = do_import(local, voucher["id"])
+    assert disabled.status_code == 409 and disabled.json()["code"] == "write_disabled"
+    enable_writes(local)
+    assert local.post(f"/api/v1/vouchers/{voucher['id']}/import", json={"confirm": False}).status_code == 422
+    local.post(f"/api/v1/vouchers/{voucher['id']}/revoke", json={})
+    unapproved = do_import(local, voucher["id"])
+    assert unapproved.status_code == 409 and unapproved.json()["code"] == "not_approved"
+    assert tally.imports == 0 and tally.requests == []
+
+
+def test_import_creates_verifies_and_never_posts_twice(local: TestClient, tally: FakeTally) -> None:
+    voucher = ready_voucher(local)
+    approve(local, voucher["id"])
+    enable_writes(local)
+    attempt = do_import(local, voucher["id"]).json()
+    assert (attempt["status"], attempt["verified"], attempt["attempt"]) == ("created", True, 1)
+    assert "every ledger entry match" in attempt["message"] and attempt["tally_master_id"] == "1000"
+    assert tally.imports == 1 and len(tally.vouchers) == 1
+    assert voucher["marker"] in tally.vouchers[0]["narration"]
+
+    current = local.get(f"/api/v1/vouchers/{voucher['id']}").json()
+    assert (current["import_status"], current["tally_master_id"]) == ("imported", "1000") and current["imported_at"]
+    again = do_import(local, voucher["id"])
+    assert again.status_code == 409 and again.json()["code"] == "already_imported"
+    regenerate = generate(local, voucher["document_id"], invoice=invoice_choice())
+    assert regenerate.status_code == 409 and regenerate.json()["code"] == "already_imported"
+    locked = local.post(f"/api/v1/vouchers/{voucher['id']}/reject", json={"note": "too late"})
+    assert locked.status_code == 409 and locked.json()["code"] == "import_locked"
+    assert tally.imports == 1
+
+
+def test_lost_answer_is_uncertain_and_retry_finds_the_voucher(local: TestClient, tally: FakeTally) -> None:
+    voucher = ready_voucher(local)
+    approve(local, voucher["id"])
+    enable_writes(local)
+    tally.import_mode = "timeout_after_create"
+    first = do_import(local, voucher["id"]).json()
+    assert first["status"] == "uncertain" and "next attempt first checks" in first["message"]
+    assert local.get(f"/api/v1/vouchers/{voucher['id']}").json()["import_status"] == "uncertain"
+
+    tally.import_mode = "ok"
+    second = do_import(local, voucher["id"]).json()
+    assert (second["status"], second["verified"], second["attempt"]) == ("already_present", True, 2)
+    assert tally.imports == 1 and len(tally.vouchers) == 1          # never posted twice
+    assert local.get(f"/api/v1/vouchers/{voucher['id']}").json()["import_status"] == "imported"
+
+
+def test_refused_import_fails_with_tallys_reason_and_can_be_retried(local: TestClient, tally: FakeTally) -> None:
+    voucher = ready_voucher(local)
+    approve(local, voucher["id"])
+    enable_writes(local)
+    tally.import_mode = "refuse"
+    refused = do_import(local, voucher["id"]).json()
+    assert refused["status"] == "refused" and "does not exist" in refused["message"]
+    assert local.get(f"/api/v1/vouchers/{voucher['id']}").json()["import_status"] == "failed"
+    tally.import_mode = "ok"
+    assert do_import(local, voucher["id"]).json()["status"] == "created"
+
+
+def test_company_must_be_open_in_tally(local: TestClient, tally: FakeTally) -> None:
+    voucher = ready_voucher(local)
+    approve(local, voucher["id"])
+    enable_writes(local)
+    tally.loaded = False
+    attempt = do_import(local, voucher["id"]).json()
+    assert attempt["status"] == "not_sent" and "not open in TallyPrime" in attempt["message"]
+    assert tally.imports == 0
+
+
+def test_interrupted_import_becomes_uncertain_at_startup(local: TestClient, tally: FakeTally) -> None:
+    voucher = ready_voucher(local)
+    approve(local, voucher["id"])
+    factory = local.app.state.session_factory
+    with factory.begin() as session:
+        row = session.get(GeneratedVoucher, voucher["id"])
+        row.import_status = ImportStatus.IMPORTING
+        session.add(VoucherImport(voucher_id=row.id, attempt=1, status=AttemptStatus.SENDING, company_name=COMPANY,
+                                  host="127.0.0.1", port=9000, xml_sha256=row.xml_sha256))
+    assert recover_interrupted_imports(factory) == 1
+    assert local.get(f"/api/v1/vouchers/{voucher['id']}").json()["import_status"] == "uncertain"
+    history = local.get(f"/api/v1/vouchers/{voucher['id']}/history").json()
+    assert history["imports"][0]["status"] == "uncertain"
+
+
+# ---- Guards and parsing ---------------------------------------------------------------------------
+
+VOUCHER = ('<VOUCHER VCHTYPE="Purchase" ACTION="Create"><DATE>20260401</DATE><VOUCHERTYPENAME>Purchase'
+           "</VOUCHERTYPENAME></VOUCHER>")
+
+
+def envelope(message: str) -> str:
+    return ("<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC>"
+            "<REPORTNAME>Vouchers</REPORTNAME></REQUESTDESC><REQUESTDATA><TALLYMESSAGE>"
+            f"{message}</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>")
+
+
+def test_import_guard_allows_only_one_new_voucher() -> None:
+    assert_voucher_import(envelope(VOUCHER))
+    for body in (
+        envelope(VOUCHER + VOUCHER),
+        envelope(VOUCHER.replace("Create", "Alter")),
+        envelope(VOUCHER.replace("Create", "Delete")),
+        envelope('<LEDGER NAME="X" ACTION="Create"/>'),
+        envelope(VOUCHER.replace("</VOUCHER>", "<LEDGER/></VOUCHER>")),
+        envelope(VOUCHER).replace("Vouchers", "All Masters"),
+        envelope(VOUCHER).replace("Import Data", "Export"),
+    ):
+        with pytest.raises(TallyWriteBlocked):
+            assert_voucher_import(body)
+    with pytest.raises(TallyWriteBlocked):
+        assert_read_only(envelope(VOUCHER))      # the read path never sends an import
+
+
+def test_client_without_write_permission_cannot_import() -> None:
+    fake = FakeTally()
+    with TallyClient("127.0.0.1", 9000, timeout=5, export_timeout=5, max_bytes=10**7, transport=fake.transport) as c:
+        with pytest.raises(TallyWriteBlocked):
+            c.import_voucher(envelope(VOUCHER))
+    assert fake.requests == []
+
+
+def test_import_responses_are_parsed() -> None:
+    created = parse_import_response("<RESPONSE><CREATED>1</CREATED><ALTERED>0</ALTERED><LASTVCHID>77</LASTVCHID>"
+                                    "<ERRORS>0</ERRORS></RESPONSE>")
+    assert created.succeeded and created.last_voucher_id == "77"
+    refused = parse_import_response("<ENVELOPE><BODY><DATA><LINEERROR>Voucher date is missing</LINEERROR>"
+                                    "<IMPORTRESULT><CREATED>0</CREATED><ERRORS>1</ERRORS></IMPORTRESULT></DATA></BODY></ENVELOPE>")
+    assert not refused.succeeded and refused.messages == ["Voucher date is missing"]
+    altered = parse_import_response("<RESPONSE><CREATED>0</CREATED><ALTERED>1</ALTERED><ERRORS>0</ERRORS></RESPONSE>")
+    assert not altered.succeeded
+    for bad in ("", "<ENVELOPE><BODY/></ENVELOPE>", "<ENVELOPE>"):
+        with pytest.raises(TallyResponseError):
+            parse_import_response(bad)
+
+
+def test_marked_voucher_parsing_ignores_the_empty_placeholder_and_udf_tags() -> None:
+    assert parse_marked_vouchers("<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>"
+                                 "<VOUCHER></VOUCHER></COLLECTION></DATA></BODY></ENVELOPE>") == []
+    [found] = parse_marked_vouchers(
+        "<ENVELOPE><BODY><DATA><COLLECTION><VOUCHER><GUID>g</GUID><DATE>20260401</DATE>"
+        "<NARRATION>Paid ref:x=1 [TA-0123456789-INV]</NARRATION><ALLLEDGERENTRIES.LIST><LEDGERNAME>A &amp; B</LEDGERNAME>"
+        "<AMOUNT>-10.00</AMOUNT><UDF:Z.LIST><UDF:Z>1</UDF:Z></UDF:Z.LIST></ALLLEDGERENTRIES.LIST></VOUCHER>"
+        "</COLLECTION></DATA></BODY></ENVELOPE>")
+    assert found.markers == ["TA-0123456789-INV"] and found.narration.startswith("Paid ref:x=1")
+    assert [(e.ledger, str(e.amount)) for e in found.entries] == [("A & B", "-10.00")]

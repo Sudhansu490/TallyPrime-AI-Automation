@@ -1,8 +1,9 @@
-"""Voucher generation endpoints (Phase 7).
+"""Voucher generation (Phase 7), approval and import (Phase 8) endpoints.
 
-Generation builds and stores TallyPrime import XML on Computer A. Nothing is
-sent to TallyPrime: there is no import endpoint in this phase, and importing
-will be a separate operation that requires approval (Phase 8).
+Generation builds and stores TallyPrime import XML on Computer A and sends
+nothing. Approval, rejection, revocation and import are separate POSTs; until
+login exists (Phase 9) they are accepted only from Computer A itself, and import
+additionally needs ``TALLY_WRITE_ENABLED=true``.
 
 Bank account numbers are masked in every response, including inside
 transaction descriptions, narrations and the XML preview.
@@ -14,6 +15,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
+import ipaddress
+
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -21,14 +24,18 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from tally_automation.api.deps import SessionDep
+from tally_automation.api.deps import SessionDep, SettingsDep
 from tally_automation.api.routes.validation import CheckOut, EligibilityOut
 from tally_automation.db.models import (
-    BankStatement, BankTransaction, GeneratedVoucher, VoucherKind, VoucherSource, VoucherStatus,
+    ApprovalStatus, AttemptStatus, BankStatement, BankTransaction, GeneratedVoucher, ImportStatus, VoucherApproval,
+    VoucherImport, VoucherKind, VoucherSource, VoucherStatus,
 )
 from tally_automation.db.session import transaction
 from tally_automation.extraction.masking import mask_in, statement_secrets
 from tally_automation.extraction.parsing import mask_account_number
+from tally_automation.tally.client import TallyConfigError, create_tally_client
+from tally_automation.vouchers import approval
+from tally_automation.vouchers.importer import import_voucher
 from tally_automation.vouchers.service import (
     InvoiceChoice, StatementChoice, VoucherError, document_vouchers, generate_invoice, generate_statement,
     prepare, stale_reasons,
@@ -171,6 +178,10 @@ class VoucherOut(BaseModel):
     superseded_at: datetime | None
     client_address: str | None
     stale_reasons: list[str]
+    approval_status: ApprovalStatus
+    import_status: ImportStatus
+    imported_at: datetime | None
+    tally_master_id: str | None
 
 
 class VoucherDetailOut(VoucherOut):
@@ -178,11 +189,90 @@ class VoucherDetailOut(VoucherOut):
     xml_sha256: str | None
 
 
+class ApproveIn(BaseModel):
+    acknowledge_warnings: bool = False
+    note: str | None = Field(default=None, max_length=500)
+
+
+class RejectIn(BaseModel):
+    note: str = Field(min_length=1, max_length=500)
+
+
+class RevokeIn(BaseModel):
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ImportIn(BaseModel):
+    confirm: Literal[True]           # the page's confirmation dialog; anything else is refused
+
+
+class ApprovalOut(BaseModel):
+    decision: str
+    xml_sha256: str | None
+    warnings_acknowledged: int
+    note: str | None
+    decided_by_user_id: int | None
+    client_address: str | None
+    decided_at: datetime
+
+
+class ImportAttemptOut(BaseModel):
+    id: int
+    attempt: int
+    status: AttemptStatus
+    company_name: str
+    host: str
+    port: int
+    xml_sha256: str
+    created_count: int | None
+    error_count: int | None
+    tally_master_id: str | None
+    verified: bool | None
+    message: str | None
+    client_address: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class HistoryOut(BaseModel):
+    approvals: list[ApprovalOut]
+    imports: list[ImportAttemptOut]
+
+
+class PermissionsOut(BaseModel):
+    local: bool                      # this browser is on Computer A: decisions and imports are accepted
+    write_enabled: bool              # TALLY_WRITE_ENABLED
+    tally_configured: bool
+    message: str
+
+
 # ---- Helpers ------------------------------------------------------------------------------
+
+def is_local(request: Request) -> bool:
+    """The request comes from Computer A itself: loopback, or the server's own address on both ends."""
+    client = request.client.host if request.client else None
+    server = request.scope.get("server")
+    try:
+        address = ipaddress.ip_address(client or "")
+    except ValueError:
+        return False
+    return address.is_loopback or (server is not None and client == server[0])
+
+
+LOCAL_ONLY = ("Until login exists (Phase 9), vouchers can be approved, rejected and imported only in a browser "
+              "on Computer A itself.")
+
+
+def _local_only(request: Request) -> JSONResponse | None:
+    if is_local(request):
+        return None
+    return JSONResponse(status_code=403, content={"detail": LOCAL_ONLY, "code": "not_local"})
+
 
 _ERROR_STATUS = {
     "not_found": 404, "no_extraction": 409, "not_eligible": 409, "no_masters": 409, "wrong_type": 409,
     "excluded_transaction": 409, "mapping_incomplete": 422, "unknown_ledger": 422, "unknown_transaction": 422,
+    "warnings_not_acknowledged": 422, "write_disabled": 409, "not_configured": 409,
 }
 
 
@@ -220,6 +310,8 @@ def _voucher_out(session: Session, voucher: GeneratedVoucher, cache: dict[Any, A
         narration=mask_in(voucher.narration, secrets), rules_version=voucher.rules_version,
         generated_at=voucher.generated_at, superseded_at=voucher.superseded_at, client_address=voucher.client_address,
         stale_reasons=stale_reasons(session, voucher, cache=cache),
+        approval_status=voucher.approval_status, import_status=voucher.import_status,
+        imported_at=voucher.imported_at, tally_master_id=voucher.tally_master_id,
     )
     if detail:
         return VoucherDetailOut(**data, xml=mask_in(voucher.xml, secrets), xml_sha256=voucher.xml_sha256)
@@ -298,10 +390,26 @@ def list_document_vouchers(
             for v in document_vouchers(session, document_id, include_superseded=include_superseded)]
 
 
+@router.get("/vouchers/permissions", response_model=PermissionsOut)
+def voucher_permissions(request: Request, settings: SettingsDep) -> PermissionsOut:
+    local = is_local(request)
+    if not local:
+        message = LOCAL_ONLY
+    elif not settings.tally_write_enabled:
+        message = ("Approval is possible. Importing is disabled: set TALLY_WRITE_ENABLED=true in .env on Computer A "
+                   "and restart the application.")
+    else:
+        message = "Approval and import are possible from this browser."
+    return PermissionsOut(local=local, write_enabled=settings.tally_write_enabled,
+                          tally_configured=bool(settings.tally_host), message=message)
+
+
 @router.get("/vouchers", response_model=list[VoucherOut])
 def list_vouchers(
     session: SessionDep,
     status: VoucherStatus | None = None,
+    approval_status: ApprovalStatus | None = None,
+    import_status: ImportStatus | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[VoucherOut]:
@@ -309,6 +417,10 @@ def list_vouchers(
     query = select(GeneratedVoucher)
     query = query.where(GeneratedVoucher.status == status) if status else query.where(
         GeneratedVoucher.status != VoucherStatus.SUPERSEDED)
+    if approval_status:
+        query = query.where(GeneratedVoucher.approval_status == approval_status)
+    if import_status:
+        query = query.where(GeneratedVoucher.import_status == import_status)
     rows = session.scalars(query.order_by(GeneratedVoucher.generated_at.desc(), GeneratedVoucher.id.desc())
                            .limit(limit).offset(offset)).all()
     cache: dict[Any, Any] = {}
@@ -321,3 +433,85 @@ def get_voucher(voucher_id: int, session: SessionDep) -> VoucherOut | JSONRespon
     if voucher is None:
         return JSONResponse(status_code=404, content={"detail": "Voucher not found.", "code": "not_found"})
     return _voucher_out(session, voucher, {}, detail=True)
+
+
+# ---- Approval and import (Phase 8) -------------------------------------------------------------
+
+def _decide(request: Request, session: Session, voucher_id: int, action) -> VoucherOut | JSONResponse:
+    refused = _local_only(request)
+    if refused is not None:
+        return refused
+    client = request.client.host if request.client else None
+    try:
+        with transaction(request.app.state.session_factory) as tx:
+            action(tx, client)
+    except VoucherError as exc:
+        return _error(exc)
+    session.expire_all()
+    voucher = session.get(GeneratedVoucher, voucher_id)
+    assert voucher is not None
+    return _voucher_out(session, voucher, {})
+
+
+@router.post("/vouchers/{voucher_id}/approve", response_model=VoucherOut, responses={403: {}, 404: {}, 409: {}, 422: {}})
+def approve_voucher(voucher_id: int, body: ApproveIn, request: Request, session: SessionDep) -> VoucherOut | JSONResponse:
+    """Approve exactly this voucher's XML for import. Sends nothing to TallyPrime."""
+    return _decide(request, session, voucher_id, lambda tx, client: approval.approve(
+        tx, voucher_id, acknowledge_warnings=body.acknowledge_warnings, note=body.note, client_address=client))
+
+
+@router.post("/vouchers/{voucher_id}/reject", response_model=VoucherOut, responses={403: {}, 404: {}, 409: {}})
+def reject_voucher(voucher_id: int, body: RejectIn, request: Request, session: SessionDep) -> VoucherOut | JSONResponse:
+    return _decide(request, session, voucher_id, lambda tx, client: approval.reject(
+        tx, voucher_id, note=body.note, client_address=client))
+
+
+@router.post("/vouchers/{voucher_id}/revoke", response_model=VoucherOut, responses={403: {}, 404: {}, 409: {}})
+def revoke_voucher(voucher_id: int, body: RevokeIn, request: Request, session: SessionDep) -> VoucherOut | JSONResponse:
+    """Withdraw an approval before import."""
+    return _decide(request, session, voucher_id, lambda tx, client: approval.revoke(
+        tx, voucher_id, note=body.note, client_address=client))
+
+
+@router.post("/vouchers/{voucher_id}/import", response_model=ImportAttemptOut, responses={403: {}, 404: {}, 409: {}})
+def import_voucher_endpoint(voucher_id: int, body: ImportIn, request: Request, session: SessionDep,
+                            settings: SettingsDep) -> ImportAttemptOut | JSONResponse:
+    """Create this approved voucher in TallyPrime (after checking it is not there already) and read it back."""
+    refused = _local_only(request)
+    if refused is not None:
+        return refused
+    if not settings.tally_write_enabled:
+        return _error(VoucherError("write_disabled", "Writing to TallyPrime is disabled. Set TALLY_WRITE_ENABLED=true "
+                                                     "in .env on Computer A and restart the application."))
+    try:
+        tally = create_tally_client(settings, transport=getattr(request.app.state, "tally_transport", None))
+    except TallyConfigError as exc:
+        return _error(VoucherError("not_configured", str(exc)))
+    client = request.client.host if request.client else None
+    try:
+        with tally:
+            attempt_id = import_voucher(request.app.state.session_factory, tally, voucher_id,
+                                        write_enabled=settings.tally_write_enabled, client_address=client)
+    except VoucherError as exc:
+        return _error(exc)
+    session.expire_all()
+    attempt = session.get(VoucherImport, attempt_id)
+    assert attempt is not None
+    return ImportAttemptOut.model_validate(attempt, from_attributes=True)
+
+
+@router.get("/vouchers/{voucher_id}/history", response_model=HistoryOut, responses={404: {}})
+def voucher_history(voucher_id: int, session: SessionDep) -> HistoryOut | JSONResponse:
+    if session.get(GeneratedVoucher, voucher_id) is None:
+        return JSONResponse(status_code=404, content={"detail": "Voucher not found.", "code": "not_found"})
+    approvals = session.scalars(select(VoucherApproval).where(VoucherApproval.voucher_id == voucher_id)
+                                .order_by(VoucherApproval.id)).all()
+    imports = session.scalars(select(VoucherImport).where(VoucherImport.voucher_id == voucher_id)
+                              .order_by(VoucherImport.attempt)).all()
+    return HistoryOut(
+        approvals=[ApprovalOut(decision=a.decision.value, xml_sha256=a.xml_sha256,
+                               warnings_acknowledged=a.warnings_acknowledged, note=a.note,
+                               decided_by_user_id=a.decided_by_user_id, client_address=a.client_address,
+                               decided_at=a.decided_at) for a in approvals],
+        imports=[ImportAttemptOut.model_validate(i, from_attributes=True) for i in imports],
+    )

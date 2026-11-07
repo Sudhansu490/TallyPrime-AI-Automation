@@ -57,6 +57,7 @@ PAGES = [
     ("/duplicates", "Duplicate management", "pages/duplicates.js"),
     ("/tally", "TallyPrime integration", "pages/tally.js"),
     ("/generate", "Voucher generation", "pages/generate.js"),
+    ("/vouchers", "Voucher review", "pages/vouchers.js"),
 ]
 
 
@@ -115,6 +116,8 @@ def test_unbuilt_pages_are_not_served(client: TestClient) -> None:
         ("/static/js/pages/duplicates.js", "text/javascript"),
         ("/static/js/pages/tally.js", "text/javascript"),
         ("/static/js/pages/generate.js", "text/javascript"),
+        ("/static/js/pages/vouchers.js", "text/javascript"),
+        ("/static/js/voucher_view.js", "text/javascript"),
         ("/static/favicon.svg", "image/svg+xml"),
     ],
 )

@@ -31,6 +31,7 @@ from tally_automation.extraction.llm import create_llm_client
 from tally_automation.processing.ocr import PaddleOcrEngine
 from tally_automation.processing.worker import ProcessingWorker
 from tally_automation.tally.service import recover_interrupted_syncs
+from tally_automation.vouchers.importer import recover_interrupted_imports
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Tests inject a fake Tally transport here; production uses the network.
         app.state.tally_transport = getattr(app.state, "tally_transport", None)
         recover_interrupted_syncs(app.state.session_factory)
+        recover_interrupted_imports(app.state.session_factory)
         worker = None
         if settings.processing_worker_enabled:
             # The OCR model loads lazily inside the worker thread on first use.

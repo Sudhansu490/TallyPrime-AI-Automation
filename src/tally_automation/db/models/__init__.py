@@ -42,9 +42,15 @@ from tally_automation.db.models.validation import (
     ValidationResult,
 )
 from tally_automation.db.models.voucher import (
+    ApprovalDecision,
+    ApprovalStatus,
+    AttemptStatus,
     GeneratedVoucher,
+    ImportStatus,
     MappingMemory,
     MappingPurpose,
+    VoucherApproval,
+    VoucherImport,
     VoucherKind,
     VoucherSource,
     VoucherStatus,
@@ -52,6 +58,10 @@ from tally_automation.db.models.voucher import (
 
 __all__ = [
     "AppUser",
+    "ApprovalDecision",
+    "ApprovalStatus",
+    "AttemptStatus",
+    "ImportStatus",
     "BankStatement",
     "BankTransaction",
     "EditableEntity",
@@ -88,6 +98,8 @@ __all__ = [
     "UserRole",
     "ValidationOutcome",
     "ValidationResult",
+    "VoucherApproval",
+    "VoucherImport",
     "VoucherKind",
     "VoucherSource",
     "VoucherStatus",

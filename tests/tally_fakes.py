@@ -9,6 +9,8 @@ an unknown company. No real company data.
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
 import httpx
 
@@ -108,6 +110,11 @@ class FakeTally:
         self.fail = fail            # "connect", "timeout" or "http500"
         self.requests: list[httpx.Request] = []
         self.overrides: dict[str, str] = {}
+        # Phase 8: vouchers "in TallyPrime" (created by imports) and how imports are answered:
+        # "ok", "refuse", "timeout_after_create" (created, but the answer is lost), "garbage".
+        self.vouchers: list[dict] = []
+        self.import_mode = "ok"
+        self.imports = 0
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -120,7 +127,11 @@ class FakeTally:
         if request.method == "GET":
             return httpx.Response(200, text=STATUS_TEXT, headers={"content-type": "text/xml; charset=utf-8"})
         body = request.content.decode()
+        if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in body:
+            return self._import(request, body)
         collection = re.search(r'<COLLECTION NAME="App(\w+)"', body).group(1)
+        if collection == "MarkedVouchers":
+            return self._lookup(body)
         company = re.search(r"<SVCURRENTCOMPANY>(.*?)</SVCURRENTCOMPANY>", body)
         if collection in self.overrides:
             text = self.overrides[collection]
@@ -135,3 +146,56 @@ class FakeTally:
     @property
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handler)
+
+    # ---- Phase 8: imports and marker lookups (SYNTHETIC) --------------------------------------
+
+    def _import(self, request: httpx.Request, body: str) -> httpx.Response:
+        self.imports += 1
+        if self.import_mode == "refuse":
+            return httpx.Response(200, text=IMPORT_REFUSED)
+        if self.import_mode == "garbage":
+            return httpx.Response(200, text="<ENVELOPE><BODY>???</BODY></ENVELOPE>")
+        voucher = ET.fromstring(body).find(".//VOUCHER")
+        self.vouchers.append({
+            "date": voucher.findtext("DATE"), "type": voucher.findtext("VOUCHERTYPENAME"),
+            "narration": voucher.findtext("NARRATION"), "guid": f"synthetic-guid-{len(self.vouchers) + 1}",
+            "master_id": str(1000 + len(self.vouchers)),
+            "entries": [(e.findtext("LEDGERNAME"), e.findtext("AMOUNT")) for e in voucher.findall("ALLLEDGERENTRIES.LIST")],
+        })
+        if self.import_mode == "timeout_after_create":
+            raise httpx.ReadTimeout("synthetic: created, answer lost", request=request)
+        return httpx.Response(200, text=IMPORT_CREATED.format(id=self.vouchers[-1]["master_id"]))
+
+    def _lookup(self, body: str) -> httpx.Response:
+        needle = re.search(r'\$Narration Contains "([^"]+)"', body).group(1)
+        start = re.search(r"<SVFROMDATE[^>]*>(\d{8})<", body).group(1)
+        end = re.search(r"<SVTODATE[^>]*>(\d{8})<", body).group(1)
+        entries = "AllLedgerEntries" in body
+        items = []
+        for v in self.vouchers:
+            if needle in (v["narration"] or "") and start <= v["date"] <= end:
+                lines = "".join(
+                    f"<ALLLEDGERENTRIES.LIST><LEDGERNAME>{escape(name)}</LEDGERNAME><AMOUNT>{amount}</AMOUNT>"
+                    "<UDF:SYNTHETICFIELD.LIST DESC=\"x\"><UDF:X>1</UDF:X></UDF:SYNTHETICFIELD.LIST></ALLLEDGERENTRIES.LIST>"
+                    for name, amount in v["entries"]) if entries else ""
+                items.append(
+                    f'<VOUCHER REMOTEID="{v["guid"]}" VCHTYPE="{escape(v["type"])}"><DATE>{v["date"]}</DATE>'
+                    f'<GUID>{v["guid"]}</GUID><MASTERID> {v["master_id"]}</MASTERID>'
+                    f'<VOUCHERTYPENAME>{escape(v["type"])}</VOUCHERTYPENAME><NARRATION>{escape(v["narration"])}</NARRATION>'
+                    f"<ISDELETED>No</ISDELETED>{lines}</VOUCHER>\n")
+        # With no match TallyPrime 6.2 still sends one empty VOUCHER element.
+        return httpx.Response(200, text=_envelope("".join(items) or "<VOUCHER></VOUCHER>\n"),
+                              headers={"content-type": "text/xml; charset=utf-8"})
+
+
+IMPORT_CREATED = (
+    "<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER><BODY><DATA><IMPORTRESULT>"
+    "<CREATED>1</CREATED><ALTERED>0</ALTERED><DELETED>0</DELETED><LASTVCHID>{id}</LASTVCHID><LASTMID>0</LASTMID>"
+    "<COMBINED>0</COMBINED><IGNORED>0</IGNORED><ERRORS>0</ERRORS><CANCELLED>0</CANCELLED>"
+    "</IMPORTRESULT></DATA></BODY></ENVELOPE>"
+)
+IMPORT_REFUSED = (
+    "<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER><BODY><DATA>"
+    "<LINEERROR>Ledger 'Synthetic Missing' does not exist!</LINEERROR><IMPORTRESULT><CREATED>0</CREATED>"
+    "<ALTERED>0</ALTERED><ERRORS>1</ERRORS></IMPORTRESULT></DATA></BODY></ENVELOPE>"
+)

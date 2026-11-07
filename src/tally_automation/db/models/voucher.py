@@ -6,6 +6,10 @@
   again for the same source supersedes the previous voucher; at most one
   voucher per source is current (partial unique index). Generation never
   contacts TallyPrime: importing is a separate, approved operation (Phase 8).
+* ``VoucherApproval`` / ``VoucherImport`` (Phase 8) – append-only approval
+  decisions (tied to the XML's SHA-256) and every import attempt with
+  TallyPrime's answer. ``approval_status`` / ``import_status`` on the voucher
+  are the current state.
 * ``MappingMemory`` – the ledger a reviewer last chose for a recurring key
   (a supplier GSTIN, a bank account, a GST head, …). It only *suggests*;
   every voucher still uses the ledgers submitted with its generation request.
@@ -18,7 +22,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import JSON, CheckConstraint, Date, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, Boolean, CheckConstraint, Date, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tally_automation.db.base import Base, DecimalText, UtcDateTime, str_enum, utc_now
@@ -40,6 +44,35 @@ class VoucherStatus(StrEnum):
     READY = "ready"              # all TallyPrime checks pass; may go to approval (Phase 8)
     BLOCKED = "blocked"          # at least one error; cannot be approved
     SUPERSEDED = "superseded"    # replaced by a later generation for the same source
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"          # not decided yet
+    APPROVED = "approved"        # a person approved exactly this XML (by SHA-256)
+    REJECTED = "rejected"        # a person refused it; generate again after fixing
+
+
+class ApprovalDecision(StrEnum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    REVOKED = "revoked"          # approval withdrawn before import
+
+
+class ImportStatus(StrEnum):
+    NOT_IMPORTED = "not_imported"
+    IMPORTING = "importing"      # being sent right now
+    IMPORTED = "imported"        # TallyPrime created it (or it was already there, found by its marker)
+    FAILED = "failed"            # TallyPrime refused it, or it certainly was not sent
+    UNCERTAIN = "uncertain"      # sent, but no usable answer: the next attempt looks it up first
+
+
+class AttemptStatus(StrEnum):
+    SENDING = "sending"
+    CREATED = "created"                  # TallyPrime reported the voucher created
+    ALREADY_PRESENT = "already_present"  # found in TallyPrime by its marker; nothing sent
+    REFUSED = "refused"                  # TallyPrime answered with errors
+    NOT_SENT = "not_sent"                # stopped before sending (connection, company, lookup)
+    UNCERTAIN = "uncertain"              # sent, answer unusable or missing
 
 
 class MappingPurpose(StrEnum):
@@ -91,8 +124,24 @@ class GeneratedVoucher(Base):
     client_address: Mapped[str | None] = mapped_column(String(64))
     generated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
     superseded_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    # Phase 8: current state; the full history is in voucher_approvals / voucher_imports.
+    approval_status: Mapped[ApprovalStatus] = mapped_column(
+        str_enum(ApprovalStatus, "approval_status"), default=ApprovalStatus.PENDING, server_default="pending")
+    approved_xml_sha256: Mapped[str | None] = mapped_column(String(64))
+    import_status: Mapped[ImportStatus] = mapped_column(
+        str_enum(ImportStatus, "import_status"), default=ImportStatus.NOT_IMPORTED, server_default="not_imported")
+    tally_master_id: Mapped[str | None] = mapped_column(String(64))
+    imported_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
 
     __table_args__ = (
+        CheckConstraint(
+            "approval_status != 'approved' OR (status = 'ready' AND approved_xml_sha256 = xml_sha256) "
+            "OR import_status = 'imported'",
+            name="approved_matches_xml",
+        ),
+        CheckConstraint(
+            "import_status = 'not_imported' OR approved_xml_sha256 IS NOT NULL", name="import_needs_approval",
+        ),
         CheckConstraint(
             "status != 'ready' OR (xml IS NOT NULL AND xml_sha256 IS NOT NULL AND error_count = 0)",
             name="ready_has_valid_xml",
@@ -121,3 +170,54 @@ class MappingMemory(Base):
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now, onupdate=utc_now)
 
     __table_args__ = (UniqueConstraint("company_guid", "purpose", "key"),)
+
+
+class VoucherApproval(Base):
+    """Append-only record of one approval decision. Never updated or deleted."""
+
+    __tablename__ = "voucher_approvals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    voucher_id: Mapped[int] = mapped_column(ForeignKey("generated_vouchers.id", ondelete="RESTRICT"), index=True)
+    decision: Mapped[ApprovalDecision] = mapped_column(str_enum(ApprovalDecision, "approval_decision"))
+    # The exact XML the decision was about.
+    xml_sha256: Mapped[str | None] = mapped_column(String(64))
+    warnings_acknowledged: Mapped[int] = mapped_column(Integer, default=0)   # number of warnings shown and accepted
+    note: Mapped[str | None] = mapped_column(Text)
+    # Login arrives in Phase 9; until then decisions are only accepted from Computer A itself.
+    decided_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="RESTRICT"))
+    client_address: Mapped[str | None] = mapped_column(String(64))
+    decided_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
+
+
+class VoucherImport(Base):
+    """One import attempt: what was sent where, and what TallyPrime answered."""
+
+    __tablename__ = "voucher_imports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    voucher_id: Mapped[int] = mapped_column(ForeignKey("generated_vouchers.id", ondelete="RESTRICT"), index=True)
+    attempt: Mapped[int] = mapped_column(Integer)
+    status: Mapped[AttemptStatus] = mapped_column(str_enum(AttemptStatus, "attempt_status"))
+    company_name: Mapped[str] = mapped_column(String(255))
+    host: Mapped[str] = mapped_column(String(255))
+    port: Mapped[int] = mapped_column(Integer)
+    xml_sha256: Mapped[str] = mapped_column(String(64))
+    created_count: Mapped[int | None] = mapped_column(Integer)
+    error_count: Mapped[int | None] = mapped_column(Integer)
+    tally_master_id: Mapped[str | None] = mapped_column(String(64))
+    # Read back from TallyPrime by the voucher's marker after the import.
+    verified: Mapped[bool | None] = mapped_column(Boolean)
+    message: Mapped[str | None] = mapped_column(Text)
+    response_excerpt: Mapped[str | None] = mapped_column(Text)
+    imported_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id", ondelete="RESTRICT"))
+    client_address: Mapped[str | None] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+
+    __table_args__ = (
+        UniqueConstraint("voucher_id", "attempt"),
+        CheckConstraint("attempt > 0", name="attempt_positive"),
+        # At most one attempt in flight per voucher.
+        Index("uq_voucher_imports_sending", "voucher_id", unique=True, sqlite_where=text("status = 'sending'")),
+    )

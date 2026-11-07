@@ -164,14 +164,14 @@ def test_stats(client: TestClient) -> None:
     assert client.get("/api/v1/documents/stats").json() == {
         "total": 0, "queued": 0, "processing": 0, "text_extracted": 0, "processed": 0, "failed": 0,
         "duplicates": 0, "possible_duplicates": 0, "validation_failed": 0, "ready_for_vouchers": 0,
-        "pending_approvals": None,
+        "pending_approvals": 0,
     }
     data = make_pdf()
     upload(client, data)
     upload(client, data)
     stats = client.get("/api/v1/documents/stats").json()
     assert (stats["total"], stats["queued"], stats["duplicates"]) == (2, 1, 1)
-    assert stats["pending_approvals"] is None  # not available before Phase 8, never a fake 0
+    assert stats["pending_approvals"] == 0  # ready vouchers waiting for approval (Phase 8)
 
 
 # ---- Cross-site protection -----------------------------------------------------

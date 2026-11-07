@@ -3,13 +3,15 @@
 AI-assisted processing of purchase invoices and bank statements into
 TallyPrime vouchers, with mandatory human review and approval.
 
-**Status: Phase 7 (voucher generation).** Documents are uploaded, validated,
+**Status: Phase 8 (approval and controlled import).** Documents are uploaded, validated,
 de-duplicated (exact file), and processed by a background worker: embedded PDF text, OCR
 only where needed, structured extraction by an LLM (Groq), then accounting validation and
 business-level duplicate detection. Reviewers correct values on the Review page and decide
 possible duplicates on the Duplicates page (both audited). The backend reads companies,
 groups, ledgers and voucher types from TallyPrime, and builds and checks TallyPrime voucher
-XML with ledgers a reviewer chooses. Nothing in this codebase can write to TallyPrime yet.
+XML with ledgers a reviewer chooses. Approved vouchers are imported into TallyPrime one at a
+time from Computer A, only with `TALLY_WRITE_ENABLED=true`, never twice, and verified by
+reading them back.
 
 ## Principles
 
@@ -84,11 +86,14 @@ src/tally_automation/
     client.py        HTTP client: host rules, timeouts, size limit, companies and masters
     masters.py       parsing of companies, groups, ledgers, voucher types; primary groups
     service.py       connection check, snapshot retrieval, interrupted-run recovery
+    importing.py     voucher import guard, marker lookup request, import answer parsing
   vouchers/
     drafts.py        voucher entries from reviewed values and chosen ledgers (no derived amounts)
     xml.py           TallyPrime import XML rendering and independent structural verification
     compat.py        TallyPrime compatibility checks against the retrieved masters
     service.py       suggestions, generation, superseding, mapping memory, staleness
+    approval.py      approve / reject / withdraw, tied to the XML's SHA-256
+    importer.py      controlled import: checks, duplicate lookup, send, read-back, recovery
   network.py         Tailscale address ranges (bind addresses and TallyPrime host)
   frontend/
     routes.py        HTML page routes and navigation
@@ -143,7 +148,7 @@ error message". Concurrent identical uploads therefore yield exactly one origina
 | `POST /api/v1/documents` | Upload one file (`multipart/form-data`: `file`, `document_type`) |
 | `GET /api/v1/documents?status=&document_type=&limit=&offset=` | List, newest first, with the latest job's stage statuses |
 | `GET /api/v1/documents/{id}` | One document |
-| `GET /api/v1/documents/stats` | Dashboard counts (`pending_approvals` is `null` until Phase 8) |
+| `GET /api/v1/documents/stats` | Dashboard counts (`pending_approvals`: ready vouchers awaiting a decision) |
 
 ## Text extraction and OCR (Phase 3)
 
@@ -480,6 +485,69 @@ by more than one ledger, so a same-GSTIN suggestion can list several parties; so
 ledgers carry the account number in the ledger *name* (not in the bank details), so the bank
 account check reports "could not compare" for them, and the name shows the number on screen.
 
+## Approval and controlled import (Phase 8)
+
+The **Vouchers** page lists generated vouchers by state (awaiting approval, approved, import
+failed, import unclear, in TallyPrime, rejected, blocked). Every action opens a confirmation
+dialog and is re-checked by the backend.
+
+**Who may act.** Until login exists (Phase 9), approve, reject, withdraw and import are accepted
+only from a browser **on Computer A itself** (loopback, or the server's own address on both ends
+of the connection); any other device gets `403 not_local`. Every decision and every import
+attempt records the device address. Reading the vouchers is possible from any allowed device.
+
+**Approval** is tied to the voucher's exact import XML (its SHA-256). Only a *ready* voucher that
+is not out of date can be approved, and its warnings must be acknowledged in the dialog.
+Rejecting needs a reason; an approval can be withdrawn before import. Generating a voucher
+again withdraws the old approval automatically. Decisions are appended to `voucher_approvals`
+and never changed.
+
+**Import** is the only operation that writes to TallyPrime. It requires
+`TALLY_WRITE_ENABLED=true` (otherwise the TallyPrime client cannot write at all), an approval
+for the current XML, a voucher that is not out of date, and the confirmation dialog. Then:
+
+1. The company named in the voucher must be open in TallyPrime; otherwise nothing is sent.
+2. **Duplicate-posting protection:** TallyPrime is searched (read-only) for a voucher whose
+   narration carries this voucher's marker, over the whole period of the books. If one exists,
+   nothing is sent; the voucher is recorded as *already in TallyPrime*.
+3. The body must pass `assert_voucher_import` immediately before sending: one `Import Data`
+   request to the Vouchers report with exactly one `VOUCHER ACTION="Create"`, no masters, no
+   alter/delete, no TDL. The read path (`assert_read_only`) refuses any import body.
+4. TallyPrime's answer is parsed (`CREATED`, `ERRORS`, `LINEERROR`, …). After *created*, the
+   voucher is read back by its marker and its date, voucher type and every ledger amount are
+   compared with what was approved (*verified*).
+
+| Attempt result | Voucher state | Next step |
+|---|---|---|
+| created / already in TallyPrime | In TallyPrime (locked: no regeneration, rejection or second import) | — |
+| refused by TallyPrime (errors) | Import failed | Fix the cause; retry, or reject and generate again |
+| not sent (connection, company not open, lookup failed) | Import failed | Retry |
+| sent, answer missing or unclear (timeout, lost connection) | Import unclear | Import again: the first step finds the voucher if TallyPrime created it, so it is never posted twice |
+
+Imports run one at a time. Each attempt is committed as *sending* before anything is sent; an
+attempt interrupted by a shutdown becomes *unclear* at the next start. All attempts are kept in
+`voucher_imports` with TallyPrime's counters, its voucher id and the verification result.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/vouchers/permissions` | Whether this browser may decide/import, and whether writing is enabled |
+| `GET /api/v1/vouchers?approval_status=&import_status=` | Filtered lists for the Vouchers page |
+| `POST /api/v1/vouchers/{id}/approve` | `{"acknowledge_warnings": true, "note": …}` |
+| `POST /api/v1/vouchers/{id}/reject` · `/revoke` | Reject (reason required) or withdraw an approval |
+| `POST /api/v1/vouchers/{id}/import` | `{"confirm": true}`: check, send, verify; returns the attempt |
+| `GET /api/v1/vouchers/{id}/history` | Every decision and import attempt |
+
+**Live test (2026-11-07), in a renamed restored copy of the company** (*… TEST COPY*, with the real
+company closed): a Receipt of ₹25,000 from the synthetic statement was approved and imported
+through the page. TallyPrime answered `CREATED 1 · ERRORS 0 · LASTVCHID 32821` in about 2 s, and
+the read-back matched. With the voucher then marked *unclear*, a second import found it by its
+marker and sent nothing; afterwards exactly one voucher in the copy carried the marker.
+
+**Observed:** the copy restored from a backup keeps the original company's GUID, so retrieving
+its masters replaces the stored masters of the real company (same GUID, the copy's name). After
+testing in a copy, close it, open the real company and retrieve its masters again; the
+application's import always names the company and refuses when that company is not open.
+
 ## Setup (Windows 11, Python 3.12.10)
 
 The project uses the existing `tally_env` virtual environment.
@@ -582,6 +650,10 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | One import XML per voucher, stored with its SHA-256 | Phase 8 imports and verifies each voucher individually; the approved bytes are the imported bytes |
 | Marker from the file hash in every narration | Lets Phase 8 detect an earlier import in TallyPrime even after a database rebuild |
 | Freshness computed on read (content digest, run, masters, eligibility) | An edit after generation can never be approved unnoticed |
+| Approve/import only from Computer A until Phase 9 | Login arrives in Phase 9; restricting to the processing computer is enforceable on the backend now |
+| Separate guards for reading and importing, and no import without `TALLY_WRITE_ENABLED` | A bug elsewhere cannot turn a read into a write, or send anything but one new voucher |
+| Lookup by marker before every import | Makes retries after an unclear answer safe; protects against posting twice even after a database rebuild |
+| Read-back verification after import | TallyPrime's "created" is confirmed against what was approved |
 
 ## Known issues
 
@@ -595,7 +667,7 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | Duplicate candidates are compared in Python after an indexed pre-filter (GSTIN, date, amount; account and dates) | Fine for thousands of documents | Revisit with a normalised invoice-number column if volume grows |
 | Validation results become outdated if the rules change | Stored results keep their `rules_version` | **Run validation again** (or `POST /documents/{id}/validate`) re-checks without an LLM call |
 | PaddleOCR 2.9 import takes ~20 s | The first OCR'd document after startup waits for the model | Loaded once per process, lazily in the worker thread, so app startup is not delayed |
-| No login yet | Anyone who can reach the app can upload | Keep `BIND_HOSTS=127.0.0.1` until Phase 9 |
+| No login yet | Anyone who can reach the app can upload; approval and import are limited to Computer A | Keep `BIND_HOSTS=127.0.0.1` until Phase 9 |
 | Computer B is not on the tailnet yet | Uploads only from Computer A | Join it to the tailnet (account `shivamacc1593@`) |
 | The Tally host's license server (port 9999) answers anyone on the tailnet, including the license serial number | Low risk inside a private tailnet | Windows Firewall on `desktop-a0fljal`: allow 9000 only from `100.111.30.101` and block 9999 from the tailnet if not needed |
 | TallyPrime must be running with the company loaded | When it is closed, status shows *Unreachable* and retrieval is impossible | Open TallyPrime and the company, then **Check connection** |
@@ -603,6 +675,8 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | Some bank ledger names contain the full account number | The name appears unmasked on the TallyPrime and Generate pages (names cannot be masked without losing which ledger it is) | Rename the ledgers in TallyPrime (e.g. keep the last 4 digits) and enter the number in the ledger's bank details |
 | Bill-wise payments are recorded *On Account* | Supplier outstanding is not reduced bill by bill | Adjust against bills in TallyPrime; bill matching may come later |
 | No voucher can be generated for a supplier or ledger missing in TallyPrime | Masters are never created by this application | Create the ledger in TallyPrime, retrieve masters again, then generate |
+| A company restored from a backup keeps the original's GUID | Retrieving the copy's masters replaces the real company's stored masters | After testing in a copy, retrieve the real company's masters again |
+| A voucher changed or deleted in TallyPrime after import is not tracked | The application shows the state at import time | Make corrections in TallyPrime; the marker in the narration links it back |
 | SQLite stores datetimes without an offset | Naive values would reach the browser and be misread as local time | `UtcDateTime` column type stores UTC, always returns UTC-aware values and refuses naive input |
 
 ## TallyPrime connectivity prerequisites (Phase 6)
@@ -616,7 +690,13 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 
 ## Phases
 
-1. Foundation ✅ · 2. Upload & processing foundation ✅ · 3. PDF text & OCR ✅ ·
-4. AI extraction ✅ · 5. Duplicates & accounting validation ✅ · 6. Tally read-only ✅ ·
-7. Voucher generation ✅ · 8. Approval & controlled import · 9. Dashboard,
-security & networking · 10. End-to-end testing & deployment
+1. Foundation ✅
+2. Upload & processing foundation ✅
+3. PDF text & OCR ✅
+4. AI extraction ✅
+5. Duplicates & accounting validation ✅
+6. Tally read-only ✅
+7. Voucher generation ✅
+8. Approval & controlled import ✅
+9. Dashboard, security & networking
+10. End-to-end testing & deployment

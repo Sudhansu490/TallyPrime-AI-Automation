@@ -1,9 +1,11 @@
-"""Read-only TallyPrime client (XML over HTTP), used only by the backend on Computer A.
+"""TallyPrime client (XML over HTTP), used only by the backend on Computer A.
 
-There is deliberately no method that imports, creates, alters or deletes
-anything. Every request body is checked by ``assert_read_only`` immediately
-before it is sent. Voucher import arrives in Phase 8 as a separate, explicitly
-approved operation.
+Reads are ``Export`` requests, each checked by ``assert_read_only`` immediately
+before it is sent. The one write is ``import_voucher`` (Phase 8): it exists
+only on a client created with ``write_enabled=True`` (``TALLY_WRITE_ENABLED``),
+and its body must pass ``assert_voucher_import`` (exactly one new voucher,
+nothing else) immediately before it is sent. Approval and duplicate checks
+happen before the client is ever asked (``vouchers.importer``).
 
 Network rules:
 
@@ -26,8 +28,13 @@ import httpx
 from tally_automation.config import Settings
 from tally_automation.network import TAILSCALE_IPV4, TAILSCALE_IPV6
 from tally_automation.tally import masters as m
+from tally_automation.tally.importing import (
+    ImportResult, TallyVoucher, assert_voucher_import, marker_lookup_request, parse_import_response,
+    parse_marked_vouchers,
+)
 from tally_automation.tally.xmlio import (
-    ParsedResponse, TallyResponseError, assert_read_only, decode, export_collection_request, parse_response,
+    ParsedResponse, TallyResponseError, TallyWriteBlocked, assert_read_only, decode, export_collection_request,
+    parse_response,
 )
 
 
@@ -37,6 +44,10 @@ class TallyConfigError(Exception):
 
 class TallyConnectionError(Exception):
     """TallyPrime could not be reached or did not answer in time."""
+
+
+class TallyNotSentError(TallyConnectionError):
+    """The connection failed before the request could be sent: TallyPrime certainly did not receive it."""
 
 
 def _allowed(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -79,9 +90,10 @@ class ExportResult:
 class TallyClient:
     def __init__(
         self, host: str, port: int, *, timeout: float, export_timeout: float, max_bytes: int,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.BaseTransport | None = None, write_enabled: bool = False,
     ) -> None:
         validate_tally_host(host)
+        self.write_enabled = write_enabled
         self.host, self.port = host, port
         bracketed = f"[{host}]" if ":" in host else host
         self.base_url = f"http://{bracketed}:{port}/"
@@ -104,9 +116,17 @@ class TallyClient:
 
     # ---- transport -------------------------------------------------------------------
 
-    def _send(self, method: str, body: str | None, timeout: float) -> tuple[bytes, str | None, int]:
+    def _send(
+        self, method: str, body: str | None, timeout: float, *, write: bool = False,
+    ) -> tuple[bytes, str | None, int]:
         if body is not None:
-            assert_read_only(body)   # last line of defence, right before the network
+            # Last line of defence, right before the network.
+            if write:
+                if not self.write_enabled:
+                    raise TallyWriteBlocked("Writing to TallyPrime is disabled (TALLY_WRITE_ENABLED=false).")
+                assert_voucher_import(body)
+            else:
+                assert_read_only(body)
         started = time.perf_counter()
         try:
             with self._client.stream(
@@ -124,6 +144,10 @@ class TallyClient:
                         )
                     chunks.append(chunk)
                 content_type = response.headers.get("content-type")
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise TallyNotSentError(
+                f"Could not connect to TallyPrime at {self.host}:{self.port} ({type(exc).__name__})."
+            ) from exc
         except httpx.TimeoutException as exc:
             raise TallyConnectionError(f"TallyPrime at {self.host}:{self.port} did not answer within {timeout:g} s.") from exc
         except httpx.TransportError as exc:
@@ -178,6 +202,22 @@ class TallyClient:
         return masters, removed
 
 
+    # ---- vouchers (Phase 8) ---------------------------------------------------------------
+
+    def marked_vouchers(
+        self, company: str, needle: str, from_date, to_date, *, entries: bool = False,
+    ) -> list[TallyVoucher]:
+        """Vouchers in the period whose narration contains ``needle`` (read-only)."""
+        body = marker_lookup_request(company, needle, from_date, to_date, entries=entries)
+        content, content_type, _ = self._send("POST", body, self.export_timeout)
+        return parse_marked_vouchers(decode(content, content_type))
+
+    def import_voucher(self, xml: str) -> ImportResult:
+        """Send one approved voucher. Raises ``TallyNotSentError`` only when it certainly was not sent."""
+        content, content_type, _ = self._send("POST", xml, self.export_timeout, write=True)
+        return parse_import_response(decode(content, content_type))
+
+
 def create_tally_client(settings: Settings, transport: httpx.BaseTransport | None = None) -> TallyClient:
     if not settings.tally_host:
         raise TallyConfigError("TallyPrime is not configured (TALLY_HOST is empty).")
@@ -185,4 +225,5 @@ def create_tally_client(settings: Settings, transport: httpx.BaseTransport | Non
         settings.tally_host, settings.tally_port, timeout=settings.tally_timeout_seconds,
         export_timeout=settings.tally_export_timeout_seconds,
         max_bytes=settings.tally_max_response_mb * 1_000_000, transport=transport,
+        write_enabled=settings.tally_write_enabled,
     )

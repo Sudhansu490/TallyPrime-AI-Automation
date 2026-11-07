@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from tally_automation.db.base import utc_now
 from tally_automation.db.models import (
+    ApprovalDecision, ApprovalStatus, ImportStatus, VoucherApproval,
     BankStatement, BankTransaction, Document, DocumentType, ExtractionRun, GeneratedVoucher, Invoice,
     MappingMemory, MappingPurpose, TallyCompany, TallyGroup, TallyLedger, TallyVoucherType, VoucherKind,
     VoucherSource, VoucherStatus,
@@ -360,6 +361,20 @@ def _supersede(session: Session, source_kind: VoucherSource, source_id: int) -> 
         GeneratedVoucher.status != VoucherStatus.SUPERSEDED,
     )).all()
     for voucher in current:
+        if voucher.import_status in (ImportStatus.IMPORTING, ImportStatus.IMPORTED, ImportStatus.UNCERTAIN):
+            raise VoucherError(
+                "already_imported",
+                "A voucher for this record is already in TallyPrime (or its import has no clear answer yet); "
+                "it cannot be generated again.",
+            )
+        if voucher.approval_status is ApprovalStatus.APPROVED:
+            voucher.approval_status, voucher.approved_xml_sha256 = ApprovalStatus.PENDING, None
+            session.add(VoucherApproval(
+                voucher_id=voucher.id, decision=ApprovalDecision.REVOKED, xml_sha256=voucher.xml_sha256,
+                warnings_acknowledged=0, note="Replaced by a new generation.", decided_at=utc_now(),
+            ))
+        if voucher.import_status is ImportStatus.FAILED:
+            voucher.import_status = ImportStatus.NOT_IMPORTED
         voucher.status, voucher.superseded_at = VoucherStatus.SUPERSEDED, utc_now()
     session.flush()
 

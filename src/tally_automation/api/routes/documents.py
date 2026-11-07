@@ -20,7 +20,9 @@ from tally_automation.db.models import (
     ProcessingStage, StageStatus, TextSource,
 )
 from tally_automation.api.routes.validation import DocumentValidationOut, document_validations
-from tally_automation.db.models import ValidationOutcome
+from tally_automation.db.models import (
+    ApprovalStatus, GeneratedVoucher, ImportStatus, ValidationOutcome, VoucherStatus,
+)
 from tally_automation.documents.validation import FileValidationError, allowed_extensions
 from tally_automation.validation.service import eligibility
 from tally_automation.processing.worker import RequeueError, requeue_document
@@ -105,7 +107,7 @@ class DocumentStats(BaseModel):
     validation_failed: int              # processed documents whose validation has errors
     ready_for_vouchers: int             # processed, validated without errors, duplicates reviewed
     # Vouchers and approvals do not exist before Phase 8; null means "not available".
-    pending_approvals: int | None
+    pending_approvals: int               # ready vouchers waiting for a decision
 
 
 class UploadLimits(BaseModel):
@@ -330,7 +332,11 @@ def document_stats(session: SessionDep) -> DocumentStats:
         possible_duplicates=sum(1 for v in validations.values() if v.open_duplicates),
         validation_failed=sum(1 for v in validations.values() if v.outcome is ValidationOutcome.FAILED),
         ready_for_vouchers=sum(1 for doc_id in processed_ids if eligibility(session, doc_id).eligible),
-        pending_approvals=None,
+        pending_approvals=session.scalar(select(func.count()).select_from(GeneratedVoucher).where(
+            GeneratedVoucher.status == VoucherStatus.READY,
+            GeneratedVoucher.approval_status == ApprovalStatus.PENDING,
+            GeneratedVoucher.import_status == ImportStatus.NOT_IMPORTED,
+        )) or 0,
     )
 
 
