@@ -400,8 +400,9 @@ def _page_out(page: DocumentPage, threshold: float) -> PageTextOut:
     responses={404: {"model": ErrorOut}, 409: {"model": ErrorOut}},
 )
 def reprocess_document(document_id: int, ingestor: IngestorDep, user: Reviewer) -> DocumentOut | JSONResponse:
-    """Queue a new attempt (all stages) for a failed document, or for one whose AI
-    extraction has not run yet. Earlier attempts are kept."""
+    """Queue a new attempt (all stages) for a failed document, for one whose AI
+    extraction has not run yet, or for a processed one whose validation failed and
+    that has no generated vouchers. Earlier attempts are kept."""
     try:
         requeue_document(ingestor.session_factory, document_id)
     except RequeueError as exc:

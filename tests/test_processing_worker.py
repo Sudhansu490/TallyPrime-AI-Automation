@@ -10,7 +10,8 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from synthetic_files import (
-    SYNTHETIC_INVOICE_LINES, make_image, make_mixed_pdf, make_pdf, make_scanned_pdf, render_text_png,
+    SYNTHETIC_INVOICE_LINES, make_image, make_mixed_pdf, make_pdf, make_scanned_pdf, make_scanner_ocr_pdf,
+    render_text_png,
 )
 from tally_automation.config import Settings
 from tally_automation.db.models import (
@@ -270,3 +271,23 @@ def test_background_thread_processes_and_stops(settings, factory, ingestor) -> N
     finally:
         worker.stop()
     assert worker._thread is None
+
+
+def test_scanner_ocr_layer_is_replaced_by_our_ocr(settings, factory, ingestor) -> None:
+    engine = FakeOcrEngine()
+    document_id = ingest(ingestor, make_scanner_ocr_pdf(), "searchable-scan.pdf")
+    make_worker(settings, factory, engine).run_once()
+    _, _, [page] = load(factory, document_id)
+    assert len(engine.calls) == 1
+    # The scanner's layer has more characters, but ours is used; both are kept as evidence.
+    assert page.text_source is TextSource.OCR
+    assert page.normalized_text.splitlines() == list(SYNTHETIC_INVOICE_LINES)
+    assert "SYN-OOO1" in page.embedded_text and "scanner's own OCR" in page.ocr_reason
+
+
+def test_scanner_ocr_layer_is_kept_when_our_ocr_reads_too_little(settings, factory, ingestor) -> None:
+    engine = FakeOcrEngine(lines=[OcrLine("SYN", 0.99, (0, 0, 10, 10))])
+    document_id = ingest(ingestor, make_scanner_ocr_pdf(), "searchable-scan.pdf")
+    make_worker(settings, factory, engine).run_once()
+    _, _, [page] = load(factory, document_id)
+    assert page.text_source is TextSource.EMBEDDED and "SYN-OOO1" in page.normalized_text

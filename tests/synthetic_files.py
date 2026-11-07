@@ -63,6 +63,25 @@ def make_scanned_pdf(lines: tuple[str, ...] = SYNTHETIC_INVOICE_LINES) -> bytes:
         return pdf.tobytes()
 
 
+SCANNER_OCR_LINES = (  # how a scanner's own OCR misreads the SYNTHETIC invoice
+    "SYNTHETlC lNVOlCE SYN-OOO1 dated O1-Se~-2O2#",
+    "Taxab|e va|ue 1,OOO.oo IGST 18O.oo Grand tota| 1,18O.oo",
+    "Qty 1O.OO NOS Rate 1OO OO NOS HSN 84l5 SYNTHETIC SUPPLIES PVT LTD",
+)
+
+
+def make_scanner_ocr_pdf(*, visible: bool = False) -> bytes:
+    """A "searchable" scan: the page image plus the scanner's own OCR as an
+    invisible text layer (render mode 3) with plenty of misread text.
+    ``visible=True`` draws the same text normally (a designed PDF with a
+    full-page background image, whose text is real)."""
+    with fitz.open(stream=make_scanned_pdf(), filetype="pdf") as pdf:
+        page = pdf[0]
+        for index, line in enumerate(SCANNER_OCR_LINES * 3):  # well over 200 letters/digits
+            page.insert_text((24, 40 + index * 20), line, fontsize=9, render_mode=0 if visible else 3)
+        return pdf.tobytes()
+
+
 def make_mixed_pdf() -> bytes:
     """Page 1 has a real text layer; page 2 is blank (needs OCR, finds nothing)."""
     with fitz.open() as pdf:

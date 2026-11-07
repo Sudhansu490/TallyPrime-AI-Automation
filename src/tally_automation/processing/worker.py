@@ -27,8 +27,8 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from tally_automation.config import Settings
 from tally_automation.db.base import utc_now
 from tally_automation.db.models import (
-    Document, DocumentPage, DocumentStatus, DocumentType, JobStatus, MediaType, ProcessingJob,
-    ProcessingStage, StageStatus, TextSource,
+    Document, DocumentPage, DocumentStatus, DocumentType, GeneratedVoucher, JobStatus, MediaType,
+    ProcessingJob, ProcessingStage, StageStatus, TextSource, ValidationOutcome, ValidationResult,
 )
 from tally_automation.db.session import transaction
 from tally_automation.documents.storage import DocumentStorage
@@ -312,6 +312,22 @@ def _page_row(job_id: int, page: PageResult) -> DocumentPage:
 REQUEUEABLE = frozenset({DocumentStatus.FAILED, DocumentStatus.TEXT_EXTRACTED})
 
 
+def _failed_validation_without_vouchers(session: Session, document: Document) -> bool:
+    """A processed document stuck on a failed validation (e.g. its text was misread)
+    may be read again, as long as nothing has been generated from it yet."""
+    if document.status is not DocumentStatus.PROCESSED:
+        return False
+    latest = session.scalar(
+        select(ValidationResult.outcome).where(ValidationResult.document_id == document.id)
+        .order_by(ValidationResult.id.desc()).limit(1)
+    )
+    if latest is not ValidationOutcome.FAILED:
+        return False
+    return session.scalar(
+        select(GeneratedVoucher.id).where(GeneratedVoucher.document_id == document.id).limit(1)
+    ) is None
+
+
 def requeue_document(session_factory: sessionmaker[Session], document_id: int) -> int:
     """Queue a new processing attempt (all stages). Returns the new job id."""
     with transaction(session_factory) as session:
@@ -320,10 +336,11 @@ def requeue_document(session_factory: sessionmaker[Session], document_id: int) -
         )
         if document is None:
             raise RequeueError("not_found", "Document not found.")
-        if document.status not in REQUEUEABLE:
+        if document.status not in REQUEUEABLE and not _failed_validation_without_vouchers(session, document):
             raise RequeueError(
                 "not_requeueable",
-                "Only failed documents, or documents whose AI extraction has not run, can be reprocessed "
+                "Only failed documents, documents whose AI extraction has not run, or processed documents "
+                "whose validation failed and that have no generated vouchers can be reprocessed "
                 f"(this one is {document.status.value}).",
             )
         attempt = max((job.attempt for job in document.jobs), default=0) + 1

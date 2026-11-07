@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from synthetic_files import SYNTHETIC_INVOICE_LINES, make_mixed_pdf, make_pdf, make_scanned_pdf
+from synthetic_files import (
+    SYNTHETIC_INVOICE_LINES, make_mixed_pdf, make_pdf, make_scanned_pdf, make_scanner_ocr_pdf,
+)
 from tally_automation.processing.pdf_text import extract_pdf_text
 
 
@@ -40,3 +42,16 @@ def test_thin_text_layer_over_full_page_image_needs_ocr(tmp_path: Path) -> None:
     [page] = extract_pdf_text(write(tmp_path, data), min_chars=10)
     assert page.char_count >= 10
     assert page.needs_ocr and "image" in page.ocr_reason
+
+
+def test_scanner_ocr_text_layer_is_read_again(tmp_path: Path) -> None:
+    [page] = extract_pdf_text(write(tmp_path, make_scanner_ocr_pdf()), min_chars=25)
+    assert page.char_count >= 200  # plenty of text, but it is the scanner's invisible OCR
+    assert page.needs_ocr and page.prefer_ocr
+    assert "scanner's own OCR" in page.ocr_reason
+
+
+def test_visible_text_over_a_background_image_is_trusted(tmp_path: Path) -> None:
+    [page] = extract_pdf_text(write(tmp_path, make_scanner_ocr_pdf(visible=True)), min_chars=25)
+    assert page.image_coverage > 0.9
+    assert not page.needs_ocr and not page.prefer_ocr and page.ocr_reason is None

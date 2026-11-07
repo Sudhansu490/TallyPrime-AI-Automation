@@ -193,3 +193,25 @@ def test_generation_rejects_cross_site_requests(client: TestClient, tally: FakeT
                            json={"company_guid": COMPANY_GUID, "invoice": invoice_choice()})
     assert response.status_code == 403
     assert client.get(f"/api/v1/documents/{document_id}/vouchers").json() == []
+
+
+def test_failed_validation_can_be_reprocessed_until_vouchers_exist(client: TestClient, tally: FakeTally) -> None:
+    misread = {"header": {**TAXED["header"], "grand_total": field("1,180.oo", "Grand Total 1,180.oo")}}
+    document_id = invoice_document(client, **misread)
+    assert client.get(f"/api/v1/documents/{document_id}").json()["validation"]["outcome"] == "failed"
+    assert client.post(f"/api/v1/documents/{document_id}/reprocess").json()["status"] == "queued"
+    process(client, FakeLlm(invoice_reply(**TAXED)))
+    document = client.get(f"/api/v1/documents/{document_id}").json()
+    assert document["status"] == "processed" and document["validation"]["outcome"] != "failed"
+
+    # Validation passes now, so there is nothing to reprocess for.
+    refused = client.post(f"/api/v1/documents/{document_id}/reprocess")
+    assert refused.status_code == 409 and refused.json()["code"] == "not_requeueable"
+
+    # Once a voucher exists, a later failed validation no longer allows reprocessing.
+    assert generate(client, document_id, invoice=invoice_choice()).status_code == 200
+    invoice_id = client.get(f"/api/v1/documents/{document_id}/extraction").json()["data"]["id"]
+    client.patch(f"/api/v1/extractions/invoice/{invoice_id}/fields/grand_total", json={"value": "9,999.00"})
+    assert client.post(f"/api/v1/documents/{document_id}/validate").json()["outcome"] == "failed"
+    refused = client.post(f"/api/v1/documents/{document_id}/reprocess")
+    assert refused.status_code == 409 and refused.json()["code"] == "not_requeueable"

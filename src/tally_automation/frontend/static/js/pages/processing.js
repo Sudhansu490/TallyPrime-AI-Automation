@@ -90,6 +90,11 @@ function actionsCell(doc) {
     )));
   } else if (doc.status === "failed") {
     cell.append(button("Reprocess", (node) => reprocess(doc, node)));
+  } else if (doc.status === "processed" && doc.validation?.outcome === "failed") {
+    // The server also refuses this once vouchers have been generated from the document.
+    cell.append(button("Reprocess", (node) => reprocess(
+      doc, node, `Validation of “${doc.original_filename}” (#${doc.id}) failed. Read it again from the start? Corrections made on the Review page are not carried over.`,
+    )));
   }
   return cell;
 }

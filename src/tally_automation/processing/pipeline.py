@@ -134,7 +134,10 @@ def _extract_pdf(path: Path, options: OcrOptions, notify: StageCallback) -> Text
         image = render_pdf_page(
             path, page.page_number, dpi=options.render_dpi, max_pixels=options.max_pixels,
         )
-        pages.append(_ocr_page(page.page_number, image, options, embedded_text=page.text, reason=page.ocr_reason))
+        pages.append(_ocr_page(
+            page.page_number, image, options,
+            embedded_text=page.text, reason=page.ocr_reason, prefer_ocr=page.prefer_ocr,
+        ))
     return TextOutcome(
         pages=pages, text_extraction=StageStatus.SUCCEEDED, ocr=StageStatus.SUCCEEDED,
         ocr_seconds=time.perf_counter() - started,
@@ -151,7 +154,7 @@ def _embedded_page(page_number: int, raw: str) -> PageResult:
 
 def _ocr_page(
     page_number: int, image: RasterImage, options: OcrOptions,
-    *, embedded_text: str | None, reason: str | None,
+    *, embedded_text: str | None, reason: str | None, prefer_ocr: bool = False,
 ) -> PageResult:
     try:
         lines = options.engine.recognize(image)
@@ -165,8 +168,10 @@ def _ocr_page(
     if embedded_text is not None:
         embedded_normalized = normalize_text(embedded_text)
         embedded_chars = meaningful_char_count(embedded_normalized)
-        # Keep the embedded layer when OCR found no more text than it already had.
-        if embedded_chars >= ocr_chars:
+        # Keep the embedded layer when OCR found no more text than it already had,
+        # unless that layer is a scanner's unreliable OCR and ours read enough text.
+        ocr_preferred = prefer_ocr and ocr_chars >= options.min_text_chars
+        if not ocr_preferred and embedded_chars >= ocr_chars:
             source, normalized, chars = TextSource.EMBEDDED, embedded_normalized, embedded_chars
 
     return PageResult(
