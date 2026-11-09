@@ -11,9 +11,9 @@
 </div>
 
 <p class="alert alert-info small">
-  <strong>Nothing is sent to TallyPrime.</strong> Generating builds the TallyPrime import XML on Computer A with the
-  ledgers you choose and checks it against the retrieved masters. Importing is a separate step with explicit approval
-  (Phase 8). Ledgers are pre-filled from matching rules (same GSTIN or account number, party names and keywords in the narration such as charges, TDS or cash) and from your earlier choices. Check every pre-filled ledger and change any that is wrong before generating.
+  <strong>Generating sends nothing to TallyPrime.</strong> It builds the TallyPrime import XML on Computer A with the
+  ledgers you choose and checks it against the retrieved masters. After that, one click on
+  <strong>Approve &amp; import into TallyPrime</strong> approves and imports all of the document's ready vouchers. Ledgers are pre-filled from matching rules (same GSTIN or account number, party names and keywords in the narration such as charges, TDS or cash) and from your earlier choices. Check every pre-filled ledger and change any that is wrong before generating.
 </p>
 
 <div id="page-message" role="status" aria-live="polite"></div>
@@ -67,6 +67,7 @@
     <label class="inline-label small"><input type="checkbox" id="show-superseded"> Show replaced vouchers</label>
   </div>
   <div id="vouchers-message" role="status" aria-live="polite"></div>
+  <div class="actions" id="approve-import"></div>
   <div id="vouchers"></div>
 </section>
 {% endblock %}

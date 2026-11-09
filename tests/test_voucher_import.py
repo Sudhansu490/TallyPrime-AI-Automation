@@ -19,7 +19,9 @@ from tally_automation.tally.client import TallyClient
 from tally_automation.tally.importing import assert_voucher_import, parse_import_response, parse_marked_vouchers
 from tally_automation.tally.xmlio import TallyResponseError, TallyWriteBlocked, assert_read_only
 from tally_automation.vouchers.importer import recover_interrupted_imports
-from test_voucher_api import EXTRA_LEDGERS, VOUCHER_TYPES, generate, invoice_choice, invoice_document
+from extraction_fakes import STATEMENT_PAGE_1, STATEMENT_PAGE_2, FakeLlm, statement_page1_reply, statement_page2_reply
+from test_extraction_api import process, text_pdf, upload
+from test_voucher_api import EXTRA_LEDGERS, VOUCHER_TYPES, generate, guid, invoice_choice, invoice_document, setup
 
 
 @pytest.fixture
@@ -269,3 +271,83 @@ def test_marked_voucher_parsing_ignores_the_empty_placeholder_and_udf_tags() -> 
         "</COLLECTION></DATA></BODY></ENVELOPE>")
     assert found.markers == ["TA-0123456789-INV"] and found.narration.startswith("Paid ref:x=1")
     assert [(e.ledger, str(e.amount)) for e in found.entries] == [("A & B", "-10.00")]
+
+
+
+# ---- One click per document: approve and import ---------------------------------------------------
+
+def statement_vouchers(client: TestClient) -> tuple[int, list[dict]]:
+    document_id = upload(client, text_pdf(STATEMENT_PAGE_1, STATEMENT_PAGE_2), "bank_statement")
+    process(client, FakeLlm(statement_page1_reply(), statement_page2_reply()), pages_per_call=1)
+    out, into = setup(client, document_id)["statement"]["transactions"]
+    vouchers = generate(client, document_id, statement={
+        "bank": guid("Synthetic Bank"),
+        "voucher_types": {"payment": "Payment", "receipt": "Receipt", "contra": "Contra"},
+        "transactions": [{"transaction_id": out["id"], "ledger": guid("Synthetic Supplier Pvt Ltd")},
+                         {"transaction_id": into["id"], "ledger": guid("Synthetic Cash")}],
+    }).json()
+    assert [v["status"] for v in vouchers] == ["ready", "ready"], vouchers
+    return document_id, vouchers
+
+
+def approve_import(client: TestClient, document_id: int, **body):
+    return client.post(f"/api/v1/documents/{document_id}/approve-import", json={"confirm": True, **body})
+
+
+def test_one_click_approves_and_imports_every_voucher_of_the_document(local: TestClient, tally: FakeTally) -> None:
+    document_id, vouchers = statement_vouchers(local)
+    enable_writes(local)
+    result = approve_import(local, document_id)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert (body["imported"], body["failed"], body["skipped"]) == (2, 0, 0)
+    assert [i["outcome"] for i in body["items"]] == ["imported", "imported"]
+    assert tally.imports == 2 and len(tally.vouchers) == 2
+    for v in vouchers:
+        current = local.get(f"/api/v1/vouchers/{v['id']}").json()
+        assert (current["approval_status"], current["import_status"]) == ("approved", "imported")
+        history = local.get(f"/api/v1/vouchers/{v['id']}/history").json()
+        assert [a["decision"] for a in history["approvals"]] == ["approved"]
+        assert history["approvals"][0]["decided_by"]
+
+    again = approve_import(local, document_id).json()          # nothing left: nothing is sent twice
+    assert again["items"] == [] and "already in TallyPrime" in again["message"]
+    assert tally.imports == 2
+
+
+def test_one_click_is_refused_without_writes_role_or_confirmation(local: TestClient, tally: FakeTally) -> None:
+    document_id, vouchers = statement_vouchers(local)
+    disabled = approve_import(local, document_id)
+    assert disabled.status_code == 409 and disabled.json()["code"] == "write_disabled"
+    enable_writes(local)
+    assert local.post(f"/api/v1/documents/{document_id}/approve-import", json={"confirm": False}).status_code == 422
+    login_as(local, UserRole.REVIEWER)
+    forbidden = approve_import(local, document_id)
+    assert forbidden.status_code == 403 and forbidden.json()["code"] == "forbidden"
+    assert tally.imports == 0
+    for v in vouchers:                                         # nothing was approved by the refused calls
+        assert local.get(f"/api/v1/vouchers/{v['id']}").json()["approval_status"] == "pending"
+
+
+def test_one_click_skips_blocked_and_rejected_and_retries_failures(local: TestClient, tally: FakeTally) -> None:
+    document_id, (payment, contra) = statement_vouchers(local)
+    local.post(f"/api/v1/vouchers/{contra['id']}/reject", json={"note": "not this one"})
+    enable_writes(local)
+    tally.import_mode = "refuse"
+    first = approve_import(local, document_id).json()
+    outcomes = {i["voucher_id"]: i["outcome"] for i in first["items"]}
+    assert outcomes == {payment["id"]: "failed", contra["id"]: "skipped"} and first["failed"] == 1
+    assert tally.vouchers == []                                 # refused: nothing created
+
+    tally.import_mode = "ok"
+    second = approve_import(local, document_id).json()
+    outcomes = {i["voucher_id"]: i["outcome"] for i in second["items"]}
+    assert outcomes == {payment["id"]: "imported", contra["id"]: "skipped"}
+    assert len(tally.vouchers) == 1
+
+
+def test_one_click_needs_generated_vouchers(local: TestClient, tally: FakeTally) -> None:
+    document_id = invoice_document(local)
+    enable_writes(local)
+    response = approve_import(local, document_id)
+    assert response.status_code == 409 and response.json()["code"] == "no_vouchers"

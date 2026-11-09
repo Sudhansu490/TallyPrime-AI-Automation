@@ -144,3 +144,78 @@ export function renderVouchers(container, vouchers, options) {
   if (!vouchers.length) container.append(el("p", { className: "muted", text: "No vouchers." }));
   for (const v of vouchers) container.append(voucherBlock(v, typeof options === "function" ? options(v) : options));
 }
+
+
+// ---- One action per document: approve and import -----------------------------------------------
+
+/** Vouchers of one document that the approve-and-import action would send. */
+export function importable(vouchers) {
+  return vouchers.filter((v) => v.status === "ready" && v.approval_status !== "rejected" &&
+    ["not_imported", "failed", "uncertain"].includes(v.import_status) && !v.stale_reasons.length);
+}
+
+function confirmDialog({ title, body, confirm }) {
+  return new Promise((resolve) => {
+    const message = el("div", { attrs: { role: "status", "aria-live": "polite" } });
+    const ok = el("button", { className: "btn", text: confirm, attrs: { type: "button" } });
+    const cancel = el("button", { className: "btn btn-secondary", text: "Cancel", attrs: { type: "button" } });
+    const dialog = el("dialog", { attrs: { "aria-label": title } }, [
+      el("h2", { text: title }), ...body, message, el("div", { className: "dialog-actions" }, [cancel, ok]),
+    ]);
+    const close = (value) => { dialog.close(); dialog.remove(); resolve(value); };
+    cancel.addEventListener("click", () => close(null));
+    dialog.addEventListener("cancel", (e) => { e.preventDefault(); if (!ok.disabled) close(null); });
+    ok.addEventListener("click", () => resolve({ dialog: { message, ok, cancel, close } }));
+    document.body.append(dialog);
+    dialog.showModal();
+  });
+}
+
+/**
+ * The single "Approve & import into TallyPrime" button for one document.
+ * ``onDone(kind, message)`` is called after the import, to show the result and reload.
+ */
+export function approveImportButton(documentId, vouchers, permissions, onDone) {
+  const ready = importable(vouchers);
+  const retry = ready.length > 0 && ready.every((v) => v.approval_status === "approved");
+  const button = el("button", { className: "btn", attrs: { type: "button" },
+    text: `${retry ? "Try import again" : "Approve & import into TallyPrime"} (${ready.length})` });
+  const blocked = vouchers.filter((v) => v.status === "blocked").length;
+  if (!permissions?.can_approve) { button.disabled = true; button.title = "Needs the approver role"; }
+  else if (!permissions.write_enabled) { button.disabled = true; button.title = "TALLY_WRITE_ENABLED is false"; }
+  else if (!ready.length) { button.disabled = true; button.title = "Nothing left to import"; }
+  button.addEventListener("click", async () => {
+    const warnings = ready.flatMap((v) => failingChecks(v.checks).filter((c) => c.severity === "warning")
+      .map((c) => `${v.source_label}: ${c.message}`));
+    const total = ready.reduce((sum, v) => sum + Number(v.amount ?? 0), 0);
+    const body = [
+      el("p", { text: `${ready.length} voucher(s) of document #${documentId}, total ${formatINR(total)}, ` +
+        `will be approved and created in the TallyPrime company “${ready[0].company_name}” now.` }),
+      el("p", { className: "small muted", text: "TallyPrime is first checked for each voucher's marker, so a voucher " +
+        "already there is never sent twice. If something is wrong afterwards, alter or delete it in TallyPrime." }),
+    ];
+    if (blocked) body.push(el("p", { className: "small", text: `${blocked} blocked voucher(s) with errors are left out.` }));
+    if (warnings.length) {
+      body.push(el("p", { className: "small", text: `Warnings (${warnings.length}):` }),
+        el("ul", { className: "small" }, warnings.map((w) => el("li", { text: w }))));
+    }
+    const answer = await confirmDialog({ title: "Approve & import into TallyPrime", body, confirm: "Approve & import" });
+    if (!answer) return;
+    const { message, ok, cancel, close } = answer.dialog;
+    ok.disabled = cancel.disabled = true;
+    message.className = "alert alert-info";
+    message.textContent = "Importing into TallyPrime…";
+    try {
+      const result = await api.post(`/documents/${documentId}/approve-import`, { confirm: true }, { timeoutMs: 600000 });
+      const problems = result.items.filter((i) => i.outcome === "failed" || i.outcome === "skipped")
+        .map((i) => `${i.source_label}: ${i.message}`);
+      close(true);
+      onDone(result.failed ? "error" : result.skipped ? "warning" : "success",
+        result.message + (problems.length ? ` ${problems.join(" · ")}` : ""));
+    } catch (error) {
+      close(true);
+      onDone("error", error?.message ?? String(error));
+    }
+  });
+  return button;
+}

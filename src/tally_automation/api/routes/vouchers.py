@@ -1,8 +1,10 @@
 """Voucher generation (Phase 7), approval and import (Phase 8) endpoints.
 
 Generation builds and stores TallyPrime import XML on Computer A and sends
-nothing (reviewer role). Approval, rejection, revocation and import are separate
-POSTs that need the approver role (Phase 9); import additionally needs
+nothing (reviewer role). The pages use one action per document, "approve and
+import", which approves every ready voucher and imports it straight away. The
+per-voucher approve, reject, revoke and import POSTs remain for the API. All of
+them need the approver role (Phase 9); importing additionally needs
 ``TALLY_WRITE_ENABLED=true``. Every action records the user and the device.
 
 Bank account numbers are masked in every response, including inside
@@ -35,6 +37,7 @@ from tally_automation.extraction.masking import mask_in, statement_secrets
 from tally_automation.extraction.parsing import mask_account_number
 from tally_automation.tally.client import TallyConfigError, create_tally_client
 from tally_automation.vouchers import approval
+from tally_automation.vouchers.document_import import approve_and_import_document
 from tally_automation.vouchers.importer import import_voucher
 from tally_automation.vouchers.service import (
     InvoiceChoice, StatementChoice, VoucherError, document_vouchers, generate_invoice, generate_statement,
@@ -207,6 +210,26 @@ class ImportIn(BaseModel):
     confirm: Literal[True]           # the page's confirmation dialog; anything else is refused
 
 
+class DocumentImportIn(BaseModel):
+    confirm: Literal[True]           # the page's confirmation dialog; anything else is refused
+
+
+class DocumentImportItemOut(BaseModel):
+    voucher_id: int
+    source_label: str
+    outcome: Literal["imported", "already_present", "failed", "skipped"]
+    message: str
+
+
+class DocumentImportOut(BaseModel):
+    imported: int
+    already_present: int
+    failed: int
+    skipped: int
+    message: str
+    items: list[DocumentImportItemOut]
+
+
 class ApprovalOut(BaseModel):
     decision: str
     xml_sha256: str | None
@@ -261,7 +284,7 @@ _user_names = user_names
 _ERROR_STATUS = {
     "not_found": 404, "no_extraction": 409, "not_eligible": 409, "no_masters": 409, "wrong_type": 409,
     "excluded_transaction": 409, "mapping_incomplete": 422, "unknown_ledger": 422, "unknown_transaction": 422,
-    "warnings_not_acknowledged": 422, "write_disabled": 409, "not_configured": 409, "same_person": 403,
+    "warnings_not_acknowledged": 422, "no_vouchers": 409, "write_disabled": 409, "not_configured": 409, "same_person": 403,
 }
 
 
@@ -416,10 +439,10 @@ def voucher_permissions(settings: SettingsDep, user: CurrentUserDep) -> Permissi
     if not can_approve:
         message = "You can view vouchers. Approving and importing needs the approver role."
     elif not settings.tally_write_enabled:
-        message = ("You can approve vouchers. Importing is disabled: set TALLY_WRITE_ENABLED=true in .env on "
+        message = ("Approving imports into TallyPrime, which is disabled: set TALLY_WRITE_ENABLED=true in .env on "
                    "Computer A and restart the application.")
     else:
-        message = "You can approve vouchers and import them into TallyPrime."
+        message = "Approve & import creates a document's ready vouchers in TallyPrime in one step."
     if can_approve and settings.require_separate_approver:
         message += " Vouchers you generated must be approved by someone else."
     return PermissionsOut(can_generate=user.can(UserRole.REVIEWER), can_approve=can_approve,
@@ -522,6 +545,51 @@ def import_voucher_endpoint(voucher_id: int, body: ImportIn, request: Request, s
     out = ImportAttemptOut.model_validate(attempt, from_attributes=True)
     out.imported_by = _user_names(session, {attempt.imported_by_user_id}).get(attempt.imported_by_user_id)
     return out
+
+
+@router.post("/documents/{document_id}/approve-import", response_model=DocumentImportOut,
+             responses={403: {}, 404: {}, 409: {}})
+def approve_and_import(document_id: int, body: DocumentImportIn, request: Request, session: SessionDep,
+                       settings: SettingsDep, user: Approver) -> DocumentImportOut | JSONResponse:
+    """Approve every ready voucher of the document and import them into TallyPrime, in one step.
+
+    The approver's click is the approval. Blocked, rejected and out-of-date vouchers are skipped.
+    """
+    if not settings.tally_write_enabled:
+        return _error(VoucherError("write_disabled", "Writing to TallyPrime is disabled. Set TALLY_WRITE_ENABLED=true "
+                                                     "in .env on Computer A and restart the application."))
+    try:
+        tally = create_tally_client(settings, transport=getattr(request.app.state, "tally_transport", None))
+    except TallyConfigError as exc:
+        return _error(VoucherError("not_configured", str(exc)))
+    client = request.client.host if request.client else None
+    try:
+        with tally:
+            result = approve_and_import_document(
+                request.app.state.session_factory, tally, document_id, write_enabled=settings.tally_write_enabled,
+                client_address=client, user_id=user.id, separate_approver=settings.require_separate_approver)
+    except VoucherError as exc:
+        return _error(exc)
+    session.expire_all()
+    items = []
+    for i in result.items:
+        voucher = session.get(GeneratedVoucher, i.voucher_id)
+        label = _source_label(session, voucher) if voucher is not None else f"Voucher {i.voucher_id}"
+        items.append(DocumentImportItemOut(voucher_id=i.voucher_id, source_label=label, outcome=i.outcome,
+                                           message=i.message))
+    done = result.count("imported") + result.count("already_present")
+    parts = [f"{done} voucher(s) are now in TallyPrime"]
+    if result.count("already_present"):
+        parts.append(f"{result.count('already_present')} of them were already there and were not sent again")
+    if result.count("failed"):
+        parts.append(f"{result.count('failed')} failed (click again to retry)")
+    if result.count("skipped"):
+        parts.append(f"{result.count('skipped')} skipped")
+    if not result.items:
+        parts = ["Every voucher of this document is already in TallyPrime"]
+    return DocumentImportOut(imported=result.count("imported"), already_present=result.count("already_present"),
+                             failed=result.count("failed"), skipped=result.count("skipped"),
+                             message="; ".join(parts) + ".", items=items)
 
 
 @router.get("/vouchers/{voucher_id}/history", response_model=HistoryOut, responses={404: {}})

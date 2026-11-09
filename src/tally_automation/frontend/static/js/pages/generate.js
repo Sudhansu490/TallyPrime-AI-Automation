@@ -8,10 +8,10 @@ import { api } from "../api.js";
 import {
   DOCUMENT_TYPE_LABELS, clear, el, formatDate, formatDateTime, formatINR, showError, showMessage,
 } from "../ui.js";
-import { KIND_LABELS, checkItem, renderVouchers } from "../voucher_view.js";
+import { KIND_LABELS, approveImportButton, checkItem, renderVouchers } from "../voucher_view.js";
 
 const $ = (id) => document.getElementById(id);
-const state = { documentId: null, companyGuid: null, setup: null, pickers: {}, rows: [] };
+const state = { documentId: null, companyGuid: null, setup: null, pickers: {}, rows: [], permissions: undefined };
 const dash = "—";
 
 
@@ -231,7 +231,7 @@ async function generate(event) {
     const ready = vouchers.filter((v) => v.status === "ready").length;
     showMessage($("generate-message"), ready === vouchers.length ? "success" : "warning",
       `Generated ${vouchers.length} voucher(s): ${ready} ready for approval, ${vouchers.length - ready} blocked. ` +
-      "Nothing was sent to TallyPrime. Approve and import them on the Vouchers page.");
+      "Nothing was sent to TallyPrime yet: click Approve & import into TallyPrime below.");
     await loadVouchers();
     $("vouchers-card").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
@@ -243,14 +243,25 @@ async function generate(event) {
 
 // ---- Generated vouchers --------------------------------------------------------------------------
 
-async function loadVouchers() {
+async function loadVouchers({ keepMessage = false } = {}) {
   const container = $("vouchers");
-  clear($("vouchers-message"));
+  if (!keepMessage) clear($("vouchers-message"));
   try {
     const all = $("show-superseded").checked;
     const vouchers = await api.get(`/documents/${state.documentId}/vouchers${all ? "?include_superseded=true" : ""}`);
     renderVouchers(container, vouchers, {});
     if (!vouchers.length) container.firstChild.textContent = "No vouchers generated for this document yet.";
+    clear($("approve-import"));
+    if (vouchers.some((v) => v.status !== "superseded")) {
+      if (state.permissions === undefined) {
+        state.permissions = await api.get("/vouchers/permissions").catch(() => null);
+      }
+      const current = vouchers.filter((v) => v.status !== "superseded");
+      $("approve-import").append(approveImportButton(state.documentId, current, state.permissions, (kind, message) => {
+        showMessage($("vouchers-message"), kind, message);
+        loadVouchers({ keepMessage: true });
+      }));
+    }
     $("vouchers-card").hidden = false;
   } catch (error) {
     showError($("vouchers-message"), error);
