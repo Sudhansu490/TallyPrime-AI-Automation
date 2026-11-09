@@ -30,6 +30,7 @@ from tally_automation.tally.xmlio import (
 )
 
 MARKER = re.compile(r"^TA-[0-9A-F]{10}-(INV|T\d{1,6})$")
+MARKER_PREFIX = re.compile(r"^TA-[0-9A-F]{10}-$")
 MARKER_IN_TEXT = re.compile(r"\[(TA-[0-9A-F]{10}-(?:INV|T\d{1,6}))\]")
 # Objects TallyPrime can create or change through an import; only VOUCHER is allowed.
 _MASTER_TAGS = {
@@ -69,8 +70,9 @@ LOOKUP_FIELDS = ("Date", "VoucherTypeName", "Narration", "MasterID", "GUID", "Re
 
 
 def marker_lookup_request(company: str, needle: str, from_date: date, to_date: date, *, entries: bool) -> str:
-    """Export vouchers in the period whose narration contains ``needle`` (a marker, or ``[TA-`` for all)."""
-    if needle != "[TA-" and not MARKER.match(needle):
+    """Export vouchers in the period whose narration contains ``needle``: a marker, a document's marker
+    prefix (``TA-<hash>-``), or ``[TA-`` for all of this application's vouchers."""
+    if needle != "[TA-" and not MARKER.match(needle) and not MARKER_PREFIX.match(needle):
         raise ValueError("invalid marker")
     methods = "".join(f"<NATIVEMETHOD>{f}</NATIVEMETHOD>" for f in LOOKUP_FIELDS)
     if entries:

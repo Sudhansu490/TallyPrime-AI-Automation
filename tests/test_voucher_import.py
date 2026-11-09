@@ -297,12 +297,19 @@ def approve_import(client: TestClient, document_id: int, **body):
 def test_one_click_approves_and_imports_every_voucher_of_the_document(local: TestClient, tally: FakeTally) -> None:
     document_id, vouchers = statement_vouchers(local)
     enable_writes(local)
+    tally.requests.clear()
     result = approve_import(local, document_id)
     assert result.status_code == 200, result.text
     body = result.json()
     assert (body["imported"], body["failed"], body["skipped"]) == (2, 0, 0)
     assert [i["outcome"] for i in body["items"]] == ["imported", "imported"]
     assert tally.imports == 2 and len(tally.vouchers) == 2
+    # One company check, ONE marker search for both, two sends, ONE read-back (was 4 per voucher).
+    kinds = [kind(r) for r in tally.requests]
+    assert kinds == ["companies", "lookup", "import", "import", "readback"], kinds
+    for v in vouchers:
+        attempt = local.get(f"/api/v1/vouchers/{v['id']}/history").json()["imports"][-1]
+        assert (attempt["status"], attempt["verified"]) == ("created", True), attempt
     for v in vouchers:
         current = local.get(f"/api/v1/vouchers/{v['id']}").json()
         assert (current["approval_status"], current["import_status"]) == ("approved", "imported")
@@ -351,3 +358,42 @@ def test_one_click_needs_generated_vouchers(local: TestClient, tally: FakeTally)
     enable_writes(local)
     response = approve_import(local, document_id)
     assert response.status_code == 409 and response.json()["code"] == "no_vouchers"
+
+
+def kind(request) -> str:
+    body = request.content.decode("utf-8", "replace")
+    if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in body:
+        return "import"
+    if "AppMarkedVouchers" in body:
+        return "readback" if "AllLedgerEntries" in body else "lookup"
+    return "companies" if "Company" in body else "other"
+
+
+def test_one_click_after_an_unclear_answer_finds_the_voucher_and_sends_only_the_rest(
+        local: TestClient, tally: FakeTally) -> None:
+    document_id, (payment, contra) = statement_vouchers(local)
+    enable_writes(local)
+    tally.import_mode = "timeout_after_create"
+    first = approve_import(local, document_id).json()
+    assert {i["outcome"] for i in first["items"]} == {"failed"} and len(tally.vouchers) == 2
+    for v in (payment, contra):
+        assert local.get(f"/api/v1/vouchers/{v['id']}").json()["import_status"] == "uncertain"
+
+    tally.import_mode = "ok"
+    second = approve_import(local, document_id).json()
+    assert [i["outcome"] for i in second["items"]] == ["already_present", "already_present"], second
+    assert tally.imports == 2 and len(tally.vouchers) == 2            # never posted twice
+    for v in (payment, contra):
+        current = local.get(f"/api/v1/vouchers/{v['id']}").json()
+        attempt = local.get(f"/api/v1/vouchers/{v['id']}/history").json()["imports"][-1]
+        assert current["import_status"] == "imported" and attempt["verified"] is True, attempt
+
+
+def test_one_click_when_the_company_is_closed_sends_nothing(local: TestClient, tally: FakeTally) -> None:
+    document_id, vouchers = statement_vouchers(local)
+    enable_writes(local)
+    tally.loaded = False
+    tally.requests.clear()
+    body = approve_import(local, document_id).json()
+    assert body["failed"] == 2 and all("not open in TallyPrime" in i["message"] for i in body["items"])
+    assert [kind(r) for r in tally.requests] == ["companies"] and tally.imports == 0

@@ -22,7 +22,7 @@ from tally_automation.db.models import ApprovalStatus, AttemptStatus, ImportStat
 from tally_automation.db.session import transaction
 from tally_automation.tally.client import TallyClient
 from tally_automation.vouchers import approval
-from tally_automation.vouchers.importer import import_voucher
+from tally_automation.vouchers.importer import import_vouchers
 from tally_automation.vouchers.service import VoucherError, document_vouchers
 
 @dataclass
@@ -81,12 +81,16 @@ def approve_and_import_document(factory: sessionmaker[Session], client: TallyCli
     result = DocumentResult()
     to_import = _approve_all(factory, document_id, result, client_address=client_address, user_id=user_id,
                              separate_approver=separate_approver)
+    attempts = import_vouchers(factory, client, to_import, write_enabled=write_enabled,
+                               client_address=client_address, user_id=user_id) if to_import else {}
     for voucher_id in to_import:
-        try:
-            attempt_id = import_voucher(factory, client, voucher_id, write_enabled=write_enabled,
-                                        client_address=client_address, user_id=user_id)
-        except VoucherError as exc:
-            result.items.append(ItemResult(voucher_id, "failed", exc.message))
+        attempt_id = attempts.get(voucher_id)
+        if attempt_id is None:
+            result.items.append(ItemResult(voucher_id, "failed", "Not attempted: the import stopped before this "
+                                                                 "voucher. Click again to continue."))
+            continue
+        if isinstance(attempt_id, VoucherError):
+            result.items.append(ItemResult(voucher_id, "failed", attempt_id.message))
             continue
         with factory() as s:
             attempt = s.get(VoucherImport, attempt_id)
