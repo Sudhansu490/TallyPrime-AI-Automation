@@ -1,6 +1,7 @@
 // Processing page: document list with stage statuses, refreshed by polling,
 // plus a read-only viewer for extracted text and a reprocess action for failures.
 // Polling pauses while the tab is hidden and stops when nothing is in flight.
+// With ?document=N (the Upload page's "Processing" button) only that document is shown.
 
 import { api } from "../api.js";
 import {
@@ -11,7 +12,7 @@ const PAGE_SIZE = 50;
 const POLL_INTERVAL_MS = 5000;
 const IN_FLIGHT = new Set(["queued", "processing"]);
 
-const state = { offset: 0, total: 0, timer: null, loading: false, lastLoaded: null };
+const state = { offset: 0, total: 0, timer: null, loading: false, lastLoaded: null, focus: null };
 const $ = (id) => document.getElementById(id);
 
 function query() {
@@ -186,7 +187,7 @@ function renderRows(items) {
   clear(body);
   for (const doc of items) {
     const job = doc.latest_job;
-    body.append(el("tr", {}, [
+    body.append(el("tr", { className: doc.id === state.focus ? "row-focus" : "" }, [
       el("td", { text: doc.id }),
       el("td", { className: "filename", text: doc.original_filename }),
       el("td", { text: DOCUMENT_TYPE_LABELS[doc.document_type] ?? doc.document_type }),
@@ -224,12 +225,38 @@ function schedule(items) {
 
 let lastItems = [];
 
+// ---- One document (from the Upload page) ---------------------------------------------------
+
+function renderFocus() {
+  const focused = state.focus !== null;
+  $("focus-banner").hidden = !focused;
+  $("filters").hidden = focused;
+  document.querySelector(".pager").hidden = focused;
+  if (focused) $("focus-text").textContent = `Showing document #${state.focus} only. `;
+}
+
+function showAll() {
+  state.focus = null;
+  const url = new URL(window.location.href);
+  url.searchParams.delete("document");
+  window.history.replaceState(null, "", url);
+  renderFocus();
+  resetAndLoad();
+}
+
+async function fetchList() {
+  if (state.focus === null) return api.get(query());
+  if (!state.lastLoaded) showMessage($("list-message"), "loading", `Loading document #${state.focus}…`);
+  const doc = await api.get(`/documents/${state.focus}`);
+  return { items: [doc], total: 1 };
+}
+
 async function load() {
   if (state.loading) return;
   state.loading = true;
   $("refresh").disabled = true;
   try {
-    const data = await api.get(query());
+    const data = await fetchList();
     state.total = data.total;
     state.lastLoaded = new Date();
     lastItems = data.items;
@@ -252,6 +279,7 @@ function resetAndLoad() {
 }
 
 $("refresh").addEventListener("click", load);
+$("show-all").addEventListener("click", showAll);
 $("text-close").addEventListener("click", () => { $("text-panel").hidden = true; });
 $("filter-status").addEventListener("change", resetAndLoad);
 $("filter-type").addEventListener("change", resetAndLoad);
@@ -262,4 +290,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") load();
   else schedule(lastItems);
 });
+const initial = Number(new URLSearchParams(window.location.search).get("document"));
+state.focus = Number.isInteger(initial) && initial > 0 ? initial : null;
+renderFocus();
 load();

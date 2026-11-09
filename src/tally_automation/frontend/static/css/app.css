@@ -272,6 +272,8 @@ dialog input[type="text"] { width: 100%; font: inherit; padding: 0.4rem 0.5rem; 
 .mapping-table td:last-child { min-width: 18rem; }
 .picker { display: flex; flex-direction: column; gap: 0.25rem; }
 .picker select, .mapping-grid select { font: inherit; max-width: 34rem; padding: 0.3rem; }
+.table tr.row-focus td { background: var(--info-bg); }
+#focus-banner { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
 .document-group { border-top: 1px solid var(--border); padding: 0.75rem 0; }
 .document-group:first-child { border-top: 0; padding-top: 0; }
 .document-group h2 { font-size: 1.05rem; margin: 0; }

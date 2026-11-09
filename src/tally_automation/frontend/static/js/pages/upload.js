@@ -61,7 +61,12 @@ function renderResult(item) {
   cell.append(el("span", { className: `badge badge-${badgeState}`, text: label }));
   if (item.message) cell.append(el("div", { className: "small", text: item.message }));
   if (item.documentId) {
-    cell.append(el("a", { className: "small", text: `Document #${item.documentId}`, attrs: { href: "/processing" } }));
+    // Opens the Processing page on exactly this uploaded document.
+    cell.append(el("div", { className: "small muted", text: `Document #${item.documentId}` }));
+    cell.append(el("a", {
+      className: "btn btn-small", text: "Processing",
+      attrs: { href: `/processing?document=${item.documentId}`, title: `Show the processing of document #${item.documentId}` },
+    }));
   }
   item.row.progress.value = item.progress;
   item.row.progress.hidden = item.status === "rejected";

@@ -173,6 +173,7 @@ function renderValidation(v) {
     el("span", { text: ` ${v.error_count} error(s), ${v.warning_count} warning(s) · rules ${v.rules_version} · ${formatDateTime(v.validated_at)}` }),
   ]));
   const e = v.eligibility;
+  setGenerate(e.eligible ? "ready" : "blocked", e.eligible ? "" : `Not yet eligible: ${e.reasons.join(" ")}`);
   status.append(e.eligible
     ? el("p", { className: "alert alert-success" }, [
       el("span", { text: "Eligible for voucher generation. " }),
@@ -213,11 +214,28 @@ function renderValidation(v) {
   $("validation-card").hidden = false;
 }
 
+// ---- Generate button: opens the Generate page on this reviewed, validated document ------------------
+
+function setGenerate(mode, title = "") {
+  const button = $("generate");
+  button.hidden = !state.documentId;
+  button.disabled = mode !== "ready";
+  button.textContent = mode === "checking" ? "Checking…" : mode === "opening" ? "Opening…" : "Generate";
+  button.title = title;
+}
+
+function openGenerate() {
+  if (!state.documentId) return;
+  setGenerate("opening");
+  window.location.href = `/generate?document=${state.documentId}`;
+}
+
 async function loadValidation() {
   clear($("validation-message"));
   try {
     renderValidation(await api.get(`/documents/${state.documentId}/validation`));
   } catch (error) {
+    setGenerate("blocked", "The validation result could not be loaded.");
     for (const id of ["validation-status", "validation-problems", "validation-duplicates", "validation-passed"]) clear($(id));
     showError($("validation-message"), error);
     $("validation-card").hidden = false;
@@ -227,11 +245,13 @@ async function loadValidation() {
 async function revalidate() {
   const button = $("revalidate");
   button.disabled = true;
+  setGenerate("checking");
   showMessage($("validation-message"), "loading", "Validating…");
   try {
     renderValidation(await api.post(`/documents/${state.documentId}/validate`));
     showMessage($("validation-message"), "success", "Validation and duplicate detection ran again.");
   } catch (error) {
+    setGenerate("blocked", "Validation could not run.");
     showError($("validation-message"), error);
   } finally {
     button.disabled = false;
@@ -334,6 +354,7 @@ async function loadDocuments() {
 }
 
 async function loadExtraction() {
+  setGenerate("checking");
   if (!state.documentId) return;
   for (const id of ["overview", "validation-card", "header-card", "rows-card"]) $(id).hidden = true;
   showMessage($("page-message"), "loading", "Loading extracted data…");
@@ -342,6 +363,7 @@ async function loadExtraction() {
     clear($("page-message"));
     await loadValidation();
   } catch (error) {
+    setGenerate("blocked", "The extracted data could not be loaded.");
     showError($("page-message"), error);
   }
 }
@@ -361,6 +383,9 @@ $("picker").addEventListener("submit", (event) => event.preventDefault());
 $("edit-form").addEventListener("submit", saveEdit);
 $("edit-cancel").addEventListener("click", () => $("edit-dialog").close());
 $("revalidate").addEventListener("click", revalidate);
+$("generate").addEventListener("click", openGenerate);
+// Coming back with the browser's Back button: do not leave the button saying "Opening…".
+window.addEventListener("pageshow", (event) => { if (event.persisted) loadExtraction(); });
 
 const initial = Number(new URLSearchParams(window.location.search).get("document"));
 state.documentId = Number.isInteger(initial) && initial > 0 ? initial : null;
