@@ -90,3 +90,38 @@ def make_mixed_pdf() -> bytes:
             page.insert_text((72, 72 + index * 20), line)
         pdf.new_page()
         return pdf.tobytes()
+
+
+# SYNTHETIC ruled statement table; each narration wraps over two lines in its cell.
+RULED_STATEMENT_ROWS = (
+    ("Txn No.", "Txn Date", "Description", "Dr Amount", "Cr Amount", "Balance"),
+    ("S0000001", "01-04-2026", "NEFT_OUT:SYNB00000001/SYNTHETIC PAYEE ONE/SYNB0000001", "1,000.00", "", "9,000.00 Cr."),
+    ("S0000002", "01-04-2026", "NEFT_CHRG:SYNB00000001 SYNTHETIC BANK CHARGES", "5.90", "", "8,994.10 Cr."),
+    ("S0000003", "02-04-2026", "NEFT_IN:SYNB00000002/SYNTHETIC CUSTOMER TWO", "", "2,500.00", "11,494.10 Cr."),
+)
+
+
+def make_ruled_statement_pdf() -> bytes:
+    """A bank-statement page whose transactions sit in a table drawn with ruling
+    lines, the narration wrapping inside a narrow column (like many bank exports)."""
+    widths = (70, 70, 150, 70, 70, 90)
+    row_height = 40
+    x0, y0 = 30, 120
+    with fitz.open() as pdf:
+        page = pdf.new_page(width=600, height=400)
+        page.insert_text((30, 60), "SYNTHETIC BANK ACCOUNT STATEMENT", fontsize=12)
+        page.insert_text((30, 80), "Statement Period : 01-04-2026 to 02-04-2026", fontsize=9)
+        xs = [x0]
+        for w in widths:
+            xs.append(xs[-1] + w)
+        ys = [y0 + i * row_height for i in range(len(RULED_STATEMENT_ROWS) + 1)]
+        for x in xs:
+            page.draw_line((x, ys[0]), (x, ys[-1]))
+        for y in ys:
+            page.draw_line((xs[0], y), (xs[-1], y))
+        for r, row in enumerate(RULED_STATEMENT_ROWS):
+            for c, cell in enumerate(row):
+                rect = fitz.Rect(xs[c] + 2, ys[r] + 2, xs[c + 1] - 2, ys[r + 1] - 2)
+                assert page.insert_textbox(rect, cell, fontsize=7) >= 0, cell
+        page.insert_text((30, ys[-1] + 30), "Closing Balance 11,494.10 Cr.", fontsize=9)
+        return pdf.tobytes()

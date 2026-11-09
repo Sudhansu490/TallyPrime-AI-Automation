@@ -1,7 +1,8 @@
 from pathlib import Path
 
 from synthetic_files import (
-    SYNTHETIC_INVOICE_LINES, make_mixed_pdf, make_pdf, make_scanned_pdf, make_scanner_ocr_pdf,
+    RULED_STATEMENT_ROWS, SYNTHETIC_INVOICE_LINES, make_mixed_pdf, make_pdf, make_ruled_statement_pdf,
+    make_scanned_pdf, make_scanner_ocr_pdf,
 )
 from tally_automation.processing.pdf_text import extract_pdf_text
 
@@ -55,3 +56,27 @@ def test_visible_text_over_a_background_image_is_trusted(tmp_path: Path) -> None
     [page] = extract_pdf_text(write(tmp_path, make_scanner_ocr_pdf(visible=True)), min_chars=25)
     assert page.image_coverage > 0.9
     assert not page.needs_ocr and not page.prefer_ocr and page.ocr_reason is None
+
+
+def test_ruled_table_rows_keep_wrapped_cells_together(tmp_path: Path) -> None:
+    [page] = extract_pdf_text(write(tmp_path, make_ruled_statement_pdf()), min_chars=25)
+    lines = page.text.splitlines()
+    # One line per table row, cells in column order, each narration whole.
+    for row in RULED_STATEMENT_ROWS:
+        expected = " | ".join(row).rstrip(" |")
+        assert expected in lines, expected
+    # Text outside the table keeps its place before and after it.
+    assert lines[0].strip() == "SYNTHETIC BANK ACCOUNT STATEMENT"
+    assert lines[-1].strip() == "Closing Balance 11,494.10 Cr."
+    assert not page.needs_ocr
+
+
+def test_pages_without_ruled_tables_are_unchanged(tmp_path: Path) -> None:
+    from tally_automation.processing.layout import Box, render_layout
+    import fitz
+    data = make_pdf("SYNTHETIC INVOICE TEXT LAYER")
+    with fitz.open(stream=data, filetype="pdf") as pdf:
+        words = pdf[0].get_text("words", sort=True)
+        expected = render_layout([Box(w[0], w[1], w[2], w[3], w[4]) for w in words])
+    [page] = extract_pdf_text(write(tmp_path, data), min_chars=10)
+    assert page.text == expected

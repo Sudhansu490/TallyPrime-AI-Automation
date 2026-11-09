@@ -16,6 +16,7 @@ its embedded text is insufficient:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,11 @@ SCANNED_PAGE_TEXT_CEILING = 200
 # above which the text layer is taken to be another program's OCR.
 INVISIBLE_TEXT_SHARE = 0.5
 _INVISIBLE_RENDER_MODE = 3
+# Smallest ruled table written row by row (smaller boxes are usually headers or stamps).
+MIN_TABLE_ROWS = 2
+MIN_TABLE_COLUMNS = 3
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -52,8 +58,7 @@ def extract_pdf_text(path: Path, *, min_chars: int) -> list[PdfPageText]:
         for index, page in enumerate(pdf):
             # Words with coordinates, laid out on a grid so table columns stay
             # distinguishable (e.g. Withdrawal vs Deposit on a bank statement).
-            words = page.get_text("words", sort=True)
-            text = render_layout([Box(w[0], w[1], w[2], w[3], w[4]) for w in words])
+            text = _page_text(page)
             chars = meaningful_char_count(text)
             coverage = _image_coverage(page)
             reason: str | None = None
@@ -79,6 +84,58 @@ def extract_pdf_text(path: Path, *, min_chars: int) -> list[PdfPageText]:
                 prefer_ocr=prefer_ocr,
             ))
     return pages
+
+
+def _page_text(page: fitz.Page) -> str:
+    """Page text in reading order. Tables drawn with ruling lines are written one
+    table row per line, cells separated by `` | ``; everything else keeps the
+    grid layout. A cell whose text wraps over several lines (a long bank
+    statement narration) then stays on its own row instead of being interleaved
+    with the lines of neighbouring rows."""
+    words = [Box(w[0], w[1], w[2], w[3], w[4]) for w in page.get_text("words", sort=True)]
+    tables = _ruled_tables(page, words)
+    if not tables:
+        return render_layout(words)
+    # Words outside the tables, grouped by which tables they come after.
+    chunks: list[list[Box]] = [[] for _ in range(len(tables) + 1)]
+    for word in words:
+        centre = fitz.Point((word.x0 + word.x1) / 2, (word.y0 + word.y1) / 2)
+        if any(rect.contains(centre) for rect, _ in tables):
+            continue
+        chunks[sum(rect.y0 <= centre.y for rect, _ in tables)].append(word)
+    parts = [render_layout(chunks[0])]
+    for (_, rows), chunk in zip(tables, chunks[1:]):
+        parts.append("\n".join(rows))
+        parts.append(render_layout(chunk))
+    return "\n".join(part for part in parts if part)
+
+
+def _ruled_tables(page: fitz.Page, words: list[Box]) -> list[tuple[fitz.Rect, list[str]]]:
+    """Tables found from the page's ruling lines, top to bottom, as (area, rows).
+    A table is used only when its cells hold every word inside its area, so a
+    misdetected table never loses text."""
+    try:
+        found = page.find_tables(strategy="lines").tables
+    except Exception:  # table detection is a best-effort aid, never a reason to fail
+        logger.warning("table detection failed", extra={"page": page.number + 1})
+        return []
+    tables: list[tuple[fitz.Rect, list[str]]] = []
+    for table in found:
+        if table.row_count < MIN_TABLE_ROWS or table.col_count < MIN_TABLE_COLUMNS:
+            continue
+        rect = fitz.Rect(table.bbox)
+        cells = table.extract()
+        rows = [
+            " | ".join(" ".join((cell or "").split()) for cell in row).rstrip(" |")
+            for row in cells
+        ]
+        inside = "".join(
+            w.text for w in words if rect.contains(fitz.Point((w.x0 + w.x1) / 2, (w.y0 + w.y1) / 2))
+        )
+        if meaningful_char_count("".join(rows)) < meaningful_char_count(inside):
+            continue
+        tables.append((rect, [row for row in rows if row.strip(" |")]))
+    return sorted(tables, key=lambda t: t[0].y0)
 
 
 def _invisible_share(page: fitz.Page) -> float:
