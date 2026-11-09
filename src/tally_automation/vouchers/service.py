@@ -37,6 +37,7 @@ from tally_automation.db.models import (
 )
 from tally_automation.validation.accounting import Check, Severity, summarize
 from tally_automation.validation.service import Eligibility, current_run_ids, eligibility
+from tally_automation.vouchers import matching
 from tally_automation.vouchers.compat import BASE_TYPES, Masters, bank_checks, purchase_checks
 from tally_automation.vouchers.drafts import (
     HEADS, BankLedgers, Draft, InvoicePlan, Ledger, PurchaseLedgers, TransactionPlan, bank_voucher_kind,
@@ -132,6 +133,12 @@ def description_key(text: str | None) -> str | None:
     words = re.sub(r"[^a-z]+", " ", text.lower()).split()
     key = " ".join(w for w in words if len(w) > 1)[:128]
     return key or None
+
+
+def category_key(kind: str) -> str:
+    """Memory key shared by every narration of one kind (bank charges, TDS, cash), whose
+    exact wording changes with each reference number."""
+    return f"category:{kind}"
 
 
 def _name_key(text: str | None) -> str:
@@ -252,16 +259,24 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
                            plans: list[TransactionPlan]) -> dict[str, Any]:
     account = re.sub(r"\D", "", statement.account_number or "")
     bank = _memory_suggestion(session, masters, MappingPurpose.BANK, account or None)
-    if account:
-        bank += [_suggest(l, "Same account number as the statement") for l in masters.ledgers.values()
-                 if l.bank_account_number and re.sub(r"\D", "", l.bank_account_number) == account]
-    counter = {
-        str(p.transaction_id): [s.to_json() for s in _memory_suggestion(
-            session, masters, MappingPurpose.COUNTER, description_key(p.description))]
-        for p in plans
-    }
+    ifsc = (statement.fields.get("ifsc") or {}).get("value")
+    bank += [_suggest(c.ledger, c.reason) for c in matching.statement_bank(masters, statement.account_number, ifsc)]
+    bank = _dedupe(bank)
+    bank_guids = {s.guid for s in bank[:1] if s.guid}
+    counter: dict[str, list[dict[str, Any]]] = {}
+    for p in plans:
+        options = _memory_suggestion(session, masters, MappingPurpose.COUNTER, description_key(p.description))
+        kind = matching.category(p.description)
+        if kind is not None:
+            options += [
+                Suggestion(s.guid, s.name, f"Chosen last time for {matching.CATEGORY_LABELS[kind]}", s.parent, s.gstin)
+                for s in _memory_suggestion(session, masters, MappingPurpose.COUNTER, category_key(kind))
+            ]
+        options += [_suggest(c.ledger, c.reason)
+                    for c in matching.counter_ledgers(masters, p.description, p.money_out, bank_guids)]
+        counter[str(p.transaction_id)] = [s.to_json() for s in _dedupe(options)]
     return {
-        "bank": [s.to_json() for s in _dedupe(bank)],
+        "bank": [s.to_json() for s in bank],
         "counter": counter,
         "voucher_types": {kind.value: [s.to_json() for s in _voucher_type_options(session, masters, kind)]
                           for kind in (VoucherKind.PAYMENT, VoucherKind.RECEIPT, VoucherKind.CONTRA)},
@@ -525,6 +540,9 @@ def generate_statement(session: Session, document_id: int, company_guid: str, ch
             marker_text=mark, client_address=client_address, user_id=user_id,
         ))
         _remember(session, company.guid, MappingPurpose.COUNTER, description_key(plan.description), counter.guid, counter.name)
+        narration_kind = matching.category(plan.description)
+        if narration_kind is not None:
+            _remember(session, company.guid, MappingPurpose.COUNTER, category_key(narration_kind), counter.guid, counter.name)
         _remember(session, company.guid, MappingPurpose.VOUCHER_TYPE, kind.value, None, voucher_type)
     account = re.sub(r"\D", "", statement.account_number or "")
     _remember(session, company.guid, MappingPurpose.BANK, account or None, bank.guid, bank.name)

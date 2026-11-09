@@ -272,6 +272,7 @@ dialog input[type="text"] { width: 100%; font: inherit; padding: 0.4rem 0.5rem; 
 .mapping-table td:last-child { min-width: 18rem; }
 .picker { display: flex; flex-direction: column; gap: 0.25rem; }
 .picker select, .mapping-grid select { font: inherit; max-width: 34rem; padding: 0.3rem; }
+.picker-note { color: var(--warn-fg); margin: 0.15rem 0 0.25rem; max-width: 34rem; }
 .picker-search { font: inherit; font-size: 0.85rem; padding: 0.25rem 0.45rem; border: 1px solid var(--border); border-radius: var(--radius); max-width: 34rem; }
 .mapping-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem; }
 .mapping-grid label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9rem; color: var(--muted); }

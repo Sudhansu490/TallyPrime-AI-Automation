@@ -1,7 +1,8 @@
 // Voucher generation (Phase 7): a reviewer chooses the TallyPrime ledgers for a
 // document's voucher(s); the backend builds the import XML, checks it against
 // the retrieved masters and stores it. Nothing is sent to TallyPrime here.
-// Suggestions are shown as suggestions: the reviewer submits every ledger.
+// The best suggestion is pre-filled (marked "Pre-filled"); the reviewer checks or
+// changes every ledger and submits them. Nothing is generated without that submit.
 
 import { api } from "../api.js";
 import {
@@ -34,8 +35,16 @@ function ledgerPicker(label, suggestions = [], onChange = null) {
   if (suggestions.length) select.append(suggested);
   select.append(results);
   results.hidden = true;
-  // Pre-select only an unambiguous suggestion; the reviewer still submits it.
-  if (suggestions.length === 1 || suggestions[0]?.reason === "Chosen last time") select.value = suggestions[0].guid;
+  // Pre-fill the best suggestion; the reviewer checks it and submits it (or picks another).
+  const best = suggestions[0];
+  const prefilled = best
+    ? `Pre-filled: ${best.reason}${suggestions.length > 1 ? ` · ${suggestions.length - 1} other suggestion(s) in the list` : ""}. Check it.`
+    : "";
+  const note = el("div", { className: "small picker-note", text: prefilled });
+  if (best) select.value = best.guid;
+  select.addEventListener("change", () => {
+    note.textContent = !select.value ? "" : select.value === best?.guid ? prefilled : "Chosen by you.";
+  });
 
   let timer = null;
   search.addEventListener("input", () => {
@@ -56,7 +65,7 @@ function ledgerPicker(label, suggestions = [], onChange = null) {
     }, 300);
   });
   if (onChange) select.addEventListener("change", onChange);
-  return { element: el("div", { className: "picker" }, [select, search]), value: () => select.value || null, select };
+  return { element: el("div", { className: "picker" }, [select, note, search]), value: () => select.value || null, select };
 }
 
 function voucherTypeSelect(label, options = []) {
