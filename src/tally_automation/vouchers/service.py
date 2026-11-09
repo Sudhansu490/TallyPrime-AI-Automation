@@ -141,6 +141,11 @@ def category_key(kind: str) -> str:
     return f"category:{kind}"
 
 
+def override_key(description_key: str | None) -> str | None:
+    """Memory key for a ledger the user chose *instead of* the party named in the narration."""
+    return f"override:{description_key}"[:128] if description_key else None
+
+
 def _name_key(text: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower().replace("&", "and"))
 
@@ -265,7 +270,14 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
     bank_guids = {s.guid for s in bank[:1] if s.guid}
     counter: dict[str, list[dict[str, Any]]] = {}
     for p in plans:
-        options = _memory_suggestion(session, masters, MappingPurpose.COUNTER, description_key(p.description))
+        key = description_key(p.description)
+        # A ledger the user picked over the party named in the narration wins; then the named party;
+        # then what was simply used last time (which may only have been an accepted pre-fill).
+        options = _memory_suggestion(session, masters, MappingPurpose.COUNTER, override_key(key))
+        named = matching.party_in_narration(masters, p.description, p.money_out, bank_guids)
+        if named is not None:
+            options.append(_suggest(named.ledger, named.reason))
+        options += _memory_suggestion(session, masters, MappingPurpose.COUNTER, key)
         kind = matching.category(p.description)
         if kind is not None:
             options += [
@@ -356,6 +368,13 @@ class StatementChoice:
     bank: str
     voucher_types: dict[str, str]              # payment / receipt / contra → voucher type name
     transactions: dict[int, str]               # transaction id → other ledger's GUID
+
+
+def _forget(session: Session, company_guid: str, purpose: MappingPurpose, key: str | None) -> None:
+    memory = _remembered(session, company_guid, purpose, key)
+    if memory is not None:
+        session.delete(memory)
+        session.flush()
 
 
 def _remember(session: Session, company_guid: str, purpose: MappingPurpose, key: str | None,
@@ -539,7 +558,13 @@ def generate_statement(session: Session, document_id: int, company_guid: str, ch
             mapping={"bank": bank.guid, "counter": counter.guid, "voucher_type": voucher_type},
             marker_text=mark, client_address=client_address, user_id=user_id,
         ))
-        _remember(session, company.guid, MappingPurpose.COUNTER, description_key(plan.description), counter.guid, counter.name)
+        key = description_key(plan.description)
+        _remember(session, company.guid, MappingPurpose.COUNTER, key, counter.guid, counter.name)
+        named = matching.party_in_narration(masters, plan.description, plan.money_out, {bank.guid})
+        if named is not None and named.ledger.guid != counter.guid:
+            _remember(session, company.guid, MappingPurpose.COUNTER, override_key(key), counter.guid, counter.name)
+        elif named is not None:
+            _forget(session, company.guid, MappingPurpose.COUNTER, override_key(key))
         narration_kind = matching.category(plan.description)
         if narration_kind is not None:
             _remember(session, company.guid, MappingPurpose.COUNTER, category_key(narration_kind), counter.guid, counter.name)

@@ -6,7 +6,7 @@ from datetime import date
 
 from tally_automation.db.models import TallyGroup, TallyLedger
 from tally_automation.vouchers.compat import Masters
-from tally_automation.vouchers.matching import category, counter_ledgers, statement_bank
+from tally_automation.vouchers.matching import category, counter_ledgers, name_tokens, party_in_narration, statement_bank
 
 
 def _ledger(name: str, parent: str, **kw) -> TallyLedger:
@@ -32,6 +32,13 @@ LEDGERS = [
     _ledger("Synthetic Payee Kumar", "Sundry Creditors"),
     _ledger("Ram", "Sundry Creditors"),
     _ledger("Interest Received", "Indirect Expenses"),
+    _ledger("P Q & R Electricals", "Sundry Creditors"),
+    _ledger("Synthetic Electricals", "Sundry Debtors"),
+    _ledger("Gridpower Company", "Sundry Debtors"),
+    _ledger("XYZ AND QQ", "Sundry Debtors"),
+    _ledger("Zeta Electric & Hardware Mart", "Sundry Creditors"),
+    _ledger("Zeta Traders", "Sundry Creditors"),
+    _ledger("Omega Power Corporation", "Sundry Creditors"),
 ]
 
 
@@ -87,3 +94,33 @@ def test_weak_matches_are_not_suggested() -> None:
     assert "Synthetic Main Bank" not in names(counter_ledgers(m, "NEFT_OUT:X/111122223333", True, bank))
     # Duties ledgers are never matched by name.
     assert "TDS Payable 194C" not in names(counter_ledgers(m, "NEFT_OUT:X/TDS PAYABLE SYNTHETIC", True, bank)[:1])
+
+
+
+def test_initials_and_short_words_are_part_of_the_name() -> None:
+    assert name_tokens("K L & M Electricals") == ["klm", "electricals"]
+    assert name_tokens("M/S. A.B.C. TRADERS") == ["abc", "traders"]
+    m = masters()
+    bank = {"l-Synthetic Main Bank"}
+    # A shared common word ("ELECTRICALS") is not enough: the initials must be there too.
+    out = counter_ledgers(m, "NEFT_OUT:SYNB1/SYNTHETIC ELECTRICALS /SYNB0000001/12", True, bank)
+    assert names(out) == ["Synthetic Electricals"]
+    assert names(counter_ledgers(m, "NEFT_OUT:SYNB1/P Q AND R ELECTRICALS/SYNB0000001", True, bank))[0] ==         "P Q & R Electricals"
+    # Initials plus a two-letter word identify the party; a cut-short word never stands in for a one-word name.
+    payer = counter_ledgers(m, "NRTGS/SYNB52026/XYZ AND QQ POWER CORP", False, bank)
+    assert names(payer) == ["XYZ AND QQ"]
+    assert party_in_narration(m, "NRTGS/SYNB52026/XYZ AND QQ POWER CORP", False, bank).ledger.name == "XYZ AND QQ"
+    assert party_in_narration(m, "NEFT_IN:SYNB123//SYNTHETIC POWER CORPORA", False, bank).ledger.name == \
+        "Synthetic Power Corporation"
+
+
+
+def test_a_ledger_named_by_most_of_its_name_is_found() -> None:
+    m = masters()
+    bank = {"l-Synthetic Main Bank"}
+    # The narration gives the first words of the ledger's longer name ("ELECTRICALS" for "Electric").
+    out = counter_ledgers(m, "NEFT_OUT:SYNB2/ZETA ELECTRICALS /SYNB0000001/12", True, bank)
+    assert names(out)[0] == "Zeta Electric & Hardware Mart" and out[0].reason.startswith("Part of the party name")
+    assert "Zeta Traders" not in names(out)                    # one shared word is not enough
+    # Common words alone ("power", "corporation") never identify a party.
+    assert "Omega Power Corporation" not in names(counter_ledgers(m, "NRTGS/SYNB5/XYZ AND QQ POWER CORPORATION", False, bank))

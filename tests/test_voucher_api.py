@@ -215,3 +215,33 @@ def test_failed_validation_can_be_reprocessed_until_vouchers_exist(client: TestC
     assert client.post(f"/api/v1/documents/{document_id}/validate").json()["outcome"] == "failed"
     refused = client.post(f"/api/v1/documents/{document_id}/reprocess")
     assert refused.status_code == 409 and refused.json()["code"] == "not_requeueable"
+
+
+
+def test_party_named_in_the_narration_beats_an_accepted_prefill_but_not_a_deliberate_choice(
+        client: TestClient, tally: FakeTally) -> None:
+    tally.overrides["Ledger"] = tally.overrides["Ledger"].replace(
+        "   </COLLECTION>", ledger("Synthetic Vendor", "Sundry Creditors") + "   </COLLECTION>")
+    assert client.post("/api/v1/tally/sync", json={"company": COMPANY}).status_code == 200
+    document_id = upload(client, text_pdf(STATEMENT_PAGE_1, STATEMENT_PAGE_2), "bank_statement")
+    process(client, FakeLlm(statement_page1_reply(), statement_page2_reply()), pages_per_call=1)
+    out, into = setup(client, document_id)["statement"]["transactions"]
+
+    def first(document: int) -> dict:
+        return setup(client, document)["suggestions"]["counter"][str(out["id"])][0]
+
+    assert (first(document_id)["name"], first(document_id)["reason"]) == ("Synthetic Vendor", "Party name in the narration")
+
+    def submit(ledger_name: str) -> None:
+        response = generate(client, document_id, statement={
+            "bank": guid("Synthetic Bank"), "voucher_types": {"payment": "Payment", "receipt": "Receipt", "contra": "Contra"},
+            "transactions": [{"transaction_id": out["id"], "ledger": guid(ledger_name)},
+                             {"transaction_id": into["id"], "ledger": guid("Synthetic Cash")}]})
+        assert response.status_code == 200, response.text
+
+    # The reviewer deliberately chose another ledger than the one named: that choice comes first next time.
+    submit("Synthetic Supplier Pvt Ltd")
+    assert first(document_id)["name"] == "Synthetic Supplier Pvt Ltd"
+    # Choosing the named party again forgets the override; the named party leads again.
+    submit("Synthetic Vendor")
+    assert first(document_id)["name"] == "Synthetic Vendor"

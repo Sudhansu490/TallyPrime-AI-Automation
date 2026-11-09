@@ -13,9 +13,13 @@ Rules, in order of strength:
   in the narration equal to a bank ledger's account number;
 * a narration category: bank charges, TDS deducted by the bank, cash
   withdrawal / deposit, interest;
-* a party name: every word of a ledger's name appears in the narration (the
-  last word may be cut short, as banks truncate narrations), preferring
-  creditors for payments and debtors for receipts.
+* a party name: every distinctive word of a ledger's name appears in the
+  narration. Initials count ("K L & M" and "KLM" are the same word) and so do
+  two-letter words ("DD"), so a ledger is never matched on one shared common
+  word. In a name of two or more words, one word may be cut short, since banks
+  truncate narrations. The match covering the most of the name comes first;
+  between equal matches, creditors are preferred for payments and debtors for
+  receipts.
 """
 
 from __future__ import annotations
@@ -141,34 +145,115 @@ def _by_category(masters: Masters, kind: str) -> list[Candidate]:
     return []
 
 
-def _name_words(name: str) -> set[str]:
-    return {w for w in words(name) if len(w) >= 3 and w not in _NOISE}
+PARTY_NAME = "Party name in the narration"
+MIN_NAME_LETTERS = 5
+
+
+_INITIALS_GAP = re.compile(r"[\s.&]*|[\s.]*and[\s.]*")
+
+
+def name_tokens(text: str | None) -> list[str]:
+    """Words of a name or narration with runs of initials joined: "K L & M", "K.L.M." and "K L AND M"
+    all give "klm". Initials separated by anything else ("M/S. A.B.C.") stay apart."""
+    lowered = re.sub(r"\bm\s*/\s*s\b\.?", " ", (text or "").lower())   # "M/S." (messrs) is not a name
+    found = [(m.group(), m.start(), m.end()) for m in re.finditer(r"[a-z]+", lowered)]
+    out: list[str] = []
+    run, run_end = "", 0
+    i = 0
+    while i < len(found):
+        word, start, end = found[i]
+        if word == "and" and run and i + 1 < len(found) and len(found[i + 1][0]) == 1                 and _INITIALS_GAP.fullmatch(lowered[run_end:found[i + 1][1]]):
+            i += 1
+            continue
+        if len(word) == 1:
+            if run and not _INITIALS_GAP.fullmatch(lowered[run_end:start]):
+                if len(run) > 1:
+                    out.append(run)
+                run = ""
+            run, run_end = run + word, end
+        else:
+            if len(run) > 1:
+                out.append(run)
+            run = ""
+            out.append(word)
+        i += 1
+    if len(run) > 1:
+        out.append(run)
+    return out
+
+
+def _name_words(name: str) -> list[str]:
+    return list(dict.fromkeys(w for w in name_tokens(name) if w not in _NOISE))
+
+
+FULL, CUT, PART = 0, 1, 2
+_REASONS = {FULL: PARTY_NAME, CUT: PARTY_NAME + " (a word cut short)", PART: "Part of the party name in the narration"}
+
+
+def _word_in(word: str, said: set[str]) -> str | None:
+    """'exact', 'prefix' (one is the start of the other: banks truncate, names abbreviate) or None."""
+    if word in said:
+        return "exact"
+    if len(word) >= 4 and any(len(w) >= 4 and (w.startswith(word) or word.startswith(w)) for w in said):
+        return "prefix"
+    return None
+
+
+def _name_match(needed: list[str], said: set[str]) -> tuple[int, int] | None:
+    """(tier, letters matched) when the narration names this ledger, else None.
+
+    FULL: every word of the name is in the narration. CUT: the same, but one word only as a
+    shortened form. PART: at least two words and at least half of the name, starting with its
+    first word, which is what tells parties apart ("KLM ...", "Zeta ..."), unlike common words
+    such as "power" or "corporation".
+    """
+    if not needed or sum(len(w) for w in needed) < MIN_NAME_LETTERS:
+        return None   # "Ram" or "AB" would match far too many narrations
+    if len(needed) == 1:
+        return (FULL, len(needed[0])) if len(needed[0]) >= 6 and needed[0] in said else None
+    found = {w: _word_in(w, said) for w in needed}
+    hits = [w for w, how in found.items() if how]
+    exact = [w for w, how in found.items() if how == "exact"]
+    letters = sum(len(w) for w in hits)
+    if len(hits) == len(needed) and len(exact) >= len(needed) - 1:
+        return (FULL if len(exact) == len(needed) else CUT), letters
+    if (len(hits) >= 2 and found[needed[0]] == "exact" and 2 * len(hits) >= len(needed)
+            and letters >= MIN_NAME_LETTERS):
+        return PART, letters
+    return None
 
 
 def _by_name(masters: Masters, description: str, money_out: bool | None) -> list[Candidate]:
-    said = {w for w in words(description) if w not in _NOISE}
+    said = {w for w in name_tokens(description) if w not in _NOISE}
     if not said:
         return []
-    found: list[tuple[int, int, Candidate]] = []
+    preferred = {"Sundry Creditors"} if money_out else {"Sundry Debtors"} if money_out is False else set()
+    found: list[tuple[int, int, int, Candidate]] = []
     for ledger in masters.ledgers.values():
         if masters.is_duty(ledger) or masters.in_groups(ledger, BANK_ACCOUNT_GROUPS):
             continue
+        best: tuple[int, int] | None = None
         for name in [ledger.name, *(ledger.aliases or [])]:
-            needed = _name_words(name)
-            if len(needed) < 2 and not (len(needed) == 1 and len(next(iter(needed), "")) >= 6):
-                continue  # one short word ("ram", "ali") matches far too much
-            missing = needed - said
-            # Banks cut narrations short: the one missing word may appear truncated.
-            if len(missing) > 1 or (missing and not any(
-                    len(w) >= 4 and next(iter(missing)).startswith(w) for w in said)):
-                continue
-            preferred = {"Sundry Creditors"} if money_out else {"Sundry Debtors"} if money_out is False else set()
-            rank = 0 if preferred and masters.in_groups(ledger, preferred) else 1
-            reason = "Party name in the narration" + (" (last word cut short)" if missing else "")
-            found.append((rank, -len(needed), Candidate(ledger, reason)))
-            break
-    found.sort(key=lambda t: (t[0], t[1], t[2].ledger.name.lower()))
-    return _unique(c for _, _, c in found)
+            match = _name_match(_name_words(name), said)
+            if match is not None and (best is None or (match[0], -match[1]) < (best[0], -best[1])):
+                best = match
+        if best is None:
+            continue
+        tier, letters = best
+        rank = 0 if preferred and masters.in_groups(ledger, preferred) else 1
+        found.append((tier, -letters, rank, Candidate(ledger, _REASONS[tier])))
+    # The fuller the match the better; between equal matches, the expected group first.
+    found.sort(key=lambda t: (t[0] == PART, t[1], t[0], t[2], t[3].ledger.name.lower()))
+    return _unique(c for *_, c in found)
+
+
+def party_in_narration(masters: Masters, description: str | None, money_out: bool | None,
+                       bank_guids: set[str]) -> Candidate | None:
+    """The ledger the narration names best, if any (its whole name, or most of it)."""
+    for c in _by_name(masters, description or "", money_out):
+        if c.ledger.guid not in bank_guids:
+            return c
+    return None
 
 
 def counter_ledgers(masters: Masters, description: str | None, money_out: bool | None,
