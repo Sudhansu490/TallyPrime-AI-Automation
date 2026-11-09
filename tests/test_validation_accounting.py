@@ -213,6 +213,31 @@ def test_newest_first_statements_are_checked_bottom_up() -> None:
     assert any(c.code == "row_order" and c.passed for c in checks)
 
 
+def test_same_day_rows_listed_newest_first_are_ordered_by_balance() -> None:
+    # All on one date, printed newest first (as some bank exports do): only the balances show the order.
+    rows = [txn("02/04/2026", None, "2,500.00", "7,500.00 Cr"), txn("02/04/2026", "5,000.00", None, "5,000.00 Cr")]
+    checks = statement_checks(statement(), rows, today=TODAY)
+    assert summarize(checks)[0] == 0, [c.message for c in checks if not c.passed]
+    order = next(c for c in checks if c.code == "row_order")
+    assert order.passed and "newest first" in order.message
+
+
+def test_same_day_rows_in_printed_order_stay_in_printed_order() -> None:
+    rows = [txn("02/04/2026", "5,000.00", None, "5,000.00 Cr"), txn("02/04/2026", None, "2,500.00", "7,500.00 Cr")]
+    checks = statement_checks(statement(), rows, today=TODAY)
+    assert summarize(checks)[0] == 0
+    assert not any(c.code == "row_order" for c in checks)
+
+
+def test_same_day_order_with_one_bad_row_still_points_at_that_row() -> None:
+    rows = [txn("02/04/2026", None, None, "7,500.00 Cr"),  # the credit was not read
+            txn("02/04/2026", "5,000.00", None, "5,000.00 Cr"), txn("02/04/2026", "5,000.00", None, "10,000.00 Cr")]
+    checks = statement_checks(statement(opening_balance=None), rows, today=TODAY)
+    bad = [c for c in checks if c.code == "running_balance" and not c.passed]
+    assert [(c.row, c.difference) for c in bad] == [(1, "2500.00")]
+    assert "credit of 2500.00" in bad[0].message
+
+
 def test_overdraft_balances_with_dr_markers() -> None:
     rows = [txn("02/04/2026", "1,500.00", None, "500.00 Dr")]
     checks = statement_checks(statement(opening_balance="1,000.00 Cr", closing_balance="500.00 Dr"), rows, today=TODAY)
@@ -228,3 +253,8 @@ def test_dates_outside_period_and_repeated_rows() -> None:
     assert warnings["repeated_transaction"].row == 2
     assert "probably real" in warnings["repeated_transaction"].message
     assert summarize(checks)[0] == 0
+
+
+def test_statement_without_transactions_is_an_error() -> None:
+    bad = failing(statement_checks(statement(), [], today=TODAY), "error")
+    assert "no_transactions" in bad and "nothing to post" in bad["no_transactions"].message

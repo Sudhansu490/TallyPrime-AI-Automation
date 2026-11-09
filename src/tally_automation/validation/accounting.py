@@ -36,7 +36,7 @@ from tally_automation.extraction.schemas import (
     INVOICE_FIELDS, LINE_ITEM_FIELDS, STATEMENT_FIELDS, TRANSACTION_FIELDS, FieldSpec,
 )
 
-RULES_VERSION = "2026-11-05.1"
+RULES_VERSION = "2026-11-09.2"
 
 PAISA = Decimal("0.01")
 ZERO = Decimal("0")
@@ -461,6 +461,48 @@ def _order(dates: list[date | None]) -> str:
     return "mixed"
 
 
+def _running_balance(
+    numbered: list[tuple[int, Fields]], opening: Decimal | None,
+) -> tuple[list[Check], int, int]:
+    """Balance checks over rows in chronological order: (failed checks, checked, mismatched)."""
+    checks: list[Check] = []
+    previous = opening
+    checked = mismatched = 0
+    for number, row in numbered:
+        debit, credit, balance = amount(row, "debit") or ZERO, amount(row, "credit") or ZERO, amount(row, "balance")
+        if previous is None:
+            previous = balance          # no opening balance: start from the first printed balance
+            continue
+        expected = previous - debit + credit
+        if balance is None:
+            previous = expected         # carry the calculated balance forward
+            continue
+        checked += 1
+        if balance != expected:
+            mismatched += 1
+            swapped = previous + debit - credit == balance
+            if not debit and not credit:
+                # Only a hint for the reviewer: the value is never filled in automatically.
+                gap = balance - previous
+                message = (
+                    "No debit or credit was read for this row. The balances fit a "
+                    f"{'credit' if gap > 0 else 'debit'} of {money(abs(gap))}: compare with the statement "
+                    "and enter the amount."
+                )
+            elif swapped:
+                message = "Balance matches only if debit and credit are swapped: the amount is probably in the wrong column."
+            else:
+                message = "Balance does not equal the previous balance − debit + credit."
+            checks.append(Check(
+                "running_balance", "accounting", Severity.ERROR, False,
+                message,
+                row=number, fields=["debit", "credit", "balance"],
+                calculated=money(expected), printed=money(balance), difference=money(balance - expected),
+            ))
+        previous = balance              # re-synchronise so one error does not cascade
+    return checks, checked, mismatched
+
+
 def statement_checks(header: Fields, rows: list[Fields], *, today: date) -> list[Check]:
     checks: list[Check] = []
     checks += extraction_checks(STATEMENT_FIELDS, header)
@@ -475,7 +517,9 @@ def statement_checks(header: Fields, rows: list[Fields], *, today: date) -> list
         ))
     if not rows:
         checks.append(Check(
-            "no_transactions", "accounting", Severity.WARNING, False, "No transactions were extracted.",
+            "no_transactions", "accounting", Severity.ERROR, False,
+            "No transactions were extracted, so there is nothing to post. If the statement lists "
+            "transactions, reprocess it; a statement with no activity needs no vouchers.",
         ))
 
     # ---- Each transaction: exactly one of debit/credit, date present and in the period
@@ -516,7 +560,9 @@ def statement_checks(header: Fields, rows: list[Fields], *, today: date) -> list
                 ))
 
     # ---- Running balance, in chronological order
-    order = _order([day(r, "txn_date") for r in rows])
+    dates = [day(r, "txn_date") for r in rows]
+    order = _order(dates)
+    opening, closing = amount(header, "opening_balance"), amount(header, "closing_balance")
     numbered = list(enumerate(rows, start=1))
     if order == "descending":
         numbered.reverse()
@@ -529,32 +575,19 @@ def statement_checks(header: Fields, rows: list[Fields], *, today: date) -> list
             "row_order", "accounting", Severity.WARNING, False,
             "Transaction dates are not in order; balances were checked in the printed order.",
         ))
-
-    opening, closing = amount(header, "opening_balance"), amount(header, "closing_balance")
-    previous = opening
-    checked = mismatched = 0
-    for number, row in numbered:
-        debit, credit, balance = amount(row, "debit") or ZERO, amount(row, "credit") or ZERO, amount(row, "balance")
-        if previous is None:
-            previous = balance          # no opening balance: start from the first printed balance
-            continue
-        expected = previous - debit + credit
-        if balance is None:
-            previous = expected         # carry the calculated balance forward
-            continue
-        checked += 1
-        if balance != expected:
-            mismatched += 1
-            swapped = previous + debit - credit == balance
+    elif len({d for d in dates if d is not None}) <= 1 and len(rows) > 1:
+        # The dates cannot tell the order (all on one day): the printed balances can.
+        newest_first = list(reversed(numbered))
+        if (_running_balance(newest_first, opening)[2] < _running_balance(numbered, opening)[2]):
+            numbered = newest_first
             checks.append(Check(
-                "running_balance", "accounting", Severity.ERROR, False,
-                ("Balance matches only if debit and credit are swapped: the amount is probably in the wrong column."
-                 if swapped else
-                 "Balance does not equal the previous balance − debit + credit."),
-                row=number, fields=["debit", "credit", "balance"],
-                calculated=money(expected), printed=money(balance), difference=money(balance - expected),
+                "row_order", "accounting", Severity.INFO, True,
+                "All transactions share one date and the balances show they are listed newest first; "
+                "balances were checked from the bottom up.",
             ))
-        previous = balance              # re-synchronise so one error does not cascade
+
+    balance_checks, checked, mismatched = _running_balance(numbered, opening)
+    checks += balance_checks
     if checked and not mismatched:
         checks.append(Check(
             "running_balance", "accounting", Severity.ERROR, True,
