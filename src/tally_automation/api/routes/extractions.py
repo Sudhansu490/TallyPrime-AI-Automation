@@ -52,7 +52,7 @@ class FieldOut(BaseModel):
     value: str | None             # canonical value (Decimal text, ISO date ...) when parsable
     raw: str | None               # text as transcribed / typed
     status: str                   # valid | warning | invalid | missing
-    method: str                   # extracted | calculated | edited
+    method: str                   # extracted | calculated | table | edited
     flags: list[str]
     messages: list[str]
     evidence: str | None

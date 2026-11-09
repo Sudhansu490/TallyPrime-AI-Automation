@@ -32,6 +32,7 @@ function tags(field) {
   const out = [];
   if (field.method === "edited") out.push(el("span", { className: "tag tag-edited", text: "Edited" }));
   if (field.method === "calculated") out.push(el("span", { className: "tag tag-calculated", text: "Calculated" }));
+  if (field.method === "table") out.push(el("span", { className: "tag tag-calculated", text: "From table" }));
   if (isLow(field)) out.push(el("span", { className: "tag tag-low", text: "Low confidence" }));
   if (field.status === "invalid") out.push(el("span", { className: "tag tag-invalid", text: "Invalid" }));
   else if (field.status === "warning") out.push(el("span", { className: "tag tag-warning", text: "Check" }));

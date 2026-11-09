@@ -35,6 +35,7 @@ from tally_automation.documents.storage import DocumentStorage
 from tally_automation.extraction.llm import LlmClient
 from tally_automation.extraction.records import save_extraction
 from tally_automation.extraction.service import ExtractionError, PageInput, extract_document
+from tally_automation.extraction.table_amounts import fill_skipped_amounts
 from tally_automation.processing.ocr import OcrEngine
 from tally_automation.processing.pipeline import OcrOptions, PageResult, StageError, extract_text
 from tally_automation.validation.service import validate_document
@@ -191,6 +192,14 @@ class ProcessingWorker:
             logger.exception("unexpected extraction error", extra={"job_id": job_id})
             self._fail(job_id, ProcessingStage.AI_EXTRACTION, f"Unexpected error: {type(exc).__name__}: {exc}")
             return
+        try:
+            # Amounts the model skipped on ruled statement tables, copied from their cells for review.
+            filled = fill_skipped_amounts(result, inputs, low_confidence=self.settings.llm_low_confidence)
+        except Exception:  # a helper for the reviewer must never discard the extraction
+            logger.exception("reading skipped amounts from the table failed", extra={"job_id": job_id})
+        else:
+            if filled:
+                logger.info("amounts read from the statement table", extra={"job_id": job_id, "rows": filled})
         validation = None
         with transaction(self.session_factory) as session:
             job = session.get(ProcessingJob, job_id)
