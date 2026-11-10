@@ -52,6 +52,13 @@ NAV_ITEMS: tuple[NavItem, ...] = (
     NavItem("Vouchers", "/vouchers", 8, True),
 )
 
+# The document workflow, shown as a step bar on these pages.
+WORKFLOW: tuple[NavItem, ...] = tuple(
+    item for path in ("/upload", "/processing", "/review", "/generate", "/vouchers")
+    for item in NAV_ITEMS if item.path == path
+)
+WORKFLOW_PATHS = frozenset(item.path for item in WORKFLOW)
+
 
 def _render(request: Request, template: str, *, title: str, page_script: str) -> HTMLResponse:
     settings = request.app.state.settings
@@ -64,6 +71,8 @@ def _render(request: Request, template: str, *, title: str, page_script: str) ->
             "version": __version__,
             "title": title,
             "nav_items": NAV_ITEMS,
+            "workflow": WORKFLOW,
+            "workflow_paths": WORKFLOW_PATHS,
             "current_path": request.url.path,
             "page_script": page_script,
             # Logged-in user for the header; the CSRF token goes into a <meta> tag

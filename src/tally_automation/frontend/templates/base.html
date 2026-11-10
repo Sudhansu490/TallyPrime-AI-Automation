@@ -10,10 +10,13 @@
   <link rel="stylesheet" href="/static/css/app.css?v={{ version }}">
   <script type="module" src="/static/js/{{ page_script }}?v={{ version }}"></script>
 </head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="/">{{ app_name }}</a>
-    {% if user %}
+<body class="{% if user %}layout-app{% else %}layout-plain{% endif %}">
+  {% if user %}
+  <aside class="sidebar">
+    <a class="brand" href="/">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8"/><path d="M9 10h14M16 10v13"/></svg>
+      <span class="brand-text">{{ app_name }}<small>TallyPrime automation</small></span>
+    </a>
     <nav class="nav" aria-label="Main">
       <ul>
         {% for item in nav_items %}
@@ -27,21 +30,49 @@
         {% endfor %}
       </ul>
     </nav>
-    <div class="user-menu">
-      <span class="small" title="Signed in as {{ user.username }}">{{ user.display_name }} <span class="badge badge-neutral">{{ user.role.value }}</span></span>
-      <a class="small" href="/account">Account</a>
-      <button type="button" class="btn btn-secondary btn-small" id="logout">Log out</button>
-    </div>
-    {% endif %}
-  </header>
+    <p class="sidebar-foot">v{{ version }}</p>
+  </aside>
+  {% endif %}
 
-  <main class="container" id="main">
-    <noscript><p class="alert alert-error">This application needs JavaScript enabled.</p></noscript>
-    {% block content %}{% endblock %}
-  </main>
+  <div class="shell">
+    <header class="topbar">
+      {% if user %}
+      <span class="topbar-title">{{ title }}</span>
+      <div class="user-menu">
+        <span class="user-chip" title="Signed in as {{ user.username }}">
+          <span class="avatar" aria-hidden="true">{{ user.display_name[:1] | upper }}</span>
+          <span class="user-name">{{ user.display_name }}</span>
+          <span class="badge badge-neutral">{{ user.role.value }}</span>
+        </span>
+        <a class="small" href="/account">Account</a>
+        <button type="button" class="btn btn-secondary btn-small" id="logout">Log out</button>
+      </div>
+      {% else %}
+      <a class="brand brand-plain" href="/">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8"/><path d="M9 10h14M16 10v13"/></svg>
+        <span class="brand-text">{{ app_name }}</span>
+      </a>
+      {% endif %}
+    </header>
 
-  <footer class="footer">
-    <span>{{ app_name }} v{{ version }}</span>
-  </footer>
+    <main class="container" id="main">
+      <noscript><p class="alert alert-error">This application needs JavaScript enabled.</p></noscript>
+      {% if user and current_path in workflow_paths %}
+      <ol class="steps" aria-label="Workflow">
+        {% for step in workflow %}
+        <li class="step{% if step.path == current_path %} step-current{% endif %}">
+          <a href="{{ step.path }}"{% if step.path == current_path %} aria-current="step"{% endif %}><span class="step-no">{{ loop.index }}</span>{{ step.label }}</a>
+        </li>
+        {% endfor %}
+      </ol>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+      <span>{{ app_name }} v{{ version }}</span>
+      <span>Runs on Computer A · TallyPrime is reached only from the server</span>
+    </footer>
+  </div>
 </body>
 </html>
