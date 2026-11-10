@@ -63,9 +63,20 @@ def digits(text: str | None) -> str:
     return re.sub(r"\D", "", text or "")
 
 
+_TDS_CASH_WITHDRAWAL = re.compile(r"\bTDS\b[\s:/_.-]*CASH[\s_.-]*(?:WD|WDL|WITHDRAWALS?)\b")
+
+
+def tds_on_cash_withdrawal(description: str | None) -> bool:
+    """"TDS CASH WD" / "TDS CASHWD": the bank's deduction on cash withdrawals. It is booked as a
+    bank charge, never as GST TDS or another TDS ledger."""
+    return bool(_TDS_CASH_WITHDRAWAL.search((description or "").upper()))
+
+
 def category(description: str | None) -> str | None:
     """What kind of entry a narration describes, from its wording alone."""
     text = (description or "").upper()
+    if tds_on_cash_withdrawal(text):
+        return "charges"
     if re.search(r"\bTDS\b", text):
         return "tds"
     if re.search(r"CHRG|CHARGE|CHGS|\bCHG\b|COMMISSION|\bFEE\b|\bFEES\b|SMS ALERT|\bGST ON\b", text):

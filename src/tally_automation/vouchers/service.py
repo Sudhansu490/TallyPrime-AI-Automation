@@ -271,9 +271,19 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
     counter: dict[str, list[dict[str, Any]]] = {}
     for p in plans:
         key = description_key(p.description)
+        options: list[Suggestion] = []
+        if matching.tds_on_cash_withdrawal(p.description):
+            # "TDS CASH WD" is always a bank charge: the bank-charges ledger comes first, before anything
+            # remembered for this narration (earlier vouchers may have used a TDS ledger).
+            options += [
+                Suggestion(s.guid, s.name, "Chosen last time for bank charges", s.parent, s.gstin)
+                for s in _memory_suggestion(session, masters, MappingPurpose.COUNTER, category_key("charges"))
+            ]
+            options += [_suggest(c.ledger, c.reason)
+                        for c in matching.counter_ledgers(masters, p.description, p.money_out, bank_guids)]
         # A ledger the user picked over the party named in the narration wins; then the named party;
         # then what was simply used last time (which may only have been an accepted pre-fill).
-        options = _memory_suggestion(session, masters, MappingPurpose.COUNTER, override_key(key))
+        options += _memory_suggestion(session, masters, MappingPurpose.COUNTER, override_key(key))
         named = matching.party_in_narration(masters, p.description, p.money_out, bank_guids)
         if named is not None:
             options.append(_suggest(named.ledger, named.reason))

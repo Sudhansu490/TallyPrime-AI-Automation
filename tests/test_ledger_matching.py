@@ -61,7 +61,11 @@ def test_masked_account_prefers_same_ifsc() -> None:
 
 def test_categories_from_the_narration() -> None:
     assert category("NEFT_CHRG:SYNB12345/SYNB0000001/12") == "charges"
-    assert category("TDS CASHWD: M310542:06-11-2026:1") == "tds"
+    # TDS on cash withdrawals is a bank charge, not GST TDS; other TDS stays TDS.
+    assert category("TDS CASHWD: M310542:06-11-2026:1") == "charges"
+    assert category("TDS CASH WD 06-11-2026") == "charges"
+    assert category("TDS/CASH WDL/SYNB12") == "charges"
+    assert category("TDS DEDUCTED U/S 194A") == "tds"
     assert category("TO SELF") == "cash"
     assert category("ATM WDL SYNTHETIC") == "cash"
     assert category("INT.PD 01-04-2026") == "interest"
@@ -72,7 +76,9 @@ def test_counter_ledger_rules() -> None:
     m = masters()
     bank = {"l-Synthetic Main Bank"}
     assert names(counter_ledgers(m, "NEFT_CHRG:SYNB12345/SYNB0000001/12", True, bank))[:2] == ["Bank Charges", "Courier Charges"]
-    tds = counter_ledgers(m, "TDS CASHWD: M310542:06-11-2026:1", True, bank)
+    for narration in ("TDS CASHWD: M310542:06-11-2026:1", "TDS CASH WD 06-11-2026"):
+        assert names(counter_ledgers(m, narration, True, bank))[0] == "Bank Charges"
+    tds = counter_ledgers(m, "TDS DEDUCTED U/S 194A", True, bank)
     assert names(tds)[0] == "TDS Receivable" and "asset" in tds[0].reason
     assert names(counter_ledgers(m, "TO SELF", True, bank)) == ["Cash"]
     # Party name, with the narration's last word cut short by the bank.
