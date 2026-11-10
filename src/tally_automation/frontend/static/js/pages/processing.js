@@ -73,8 +73,9 @@ function detailsCell(doc) {
 
 function actionsCell(doc) {
   const cell = el("td", { className: "row-actions" });
-  const button = (text, onClick) => {
-    const node = el("button", { className: "btn btn-secondary btn-small", text, attrs: { type: "button" } });
+  // Actions that move the document forward use the theme's primary colour; viewing stays secondary.
+  const button = (text, onClick, { primary = false } = {}) => {
+    const node = el("button", { className: `btn btn-small${primary ? "" : " btn-secondary"}`, text, attrs: { type: "button" } });
     node.addEventListener("click", () => onClick(node));
     return node;
   };
@@ -88,14 +89,14 @@ function actionsCell(doc) {
   if (doc.status === "text_extracted") {
     cell.append(button("Run AI extraction", (node) => reprocess(
       doc, node, `AI extraction was not configured when “${doc.original_filename}” (#${doc.id}) was processed. Process it again, including AI extraction?`,
-    )));
+    ), { primary: true }));
   } else if (doc.status === "failed") {
-    cell.append(button("Reprocess", (node) => reprocess(doc, node)));
+    cell.append(button("Reprocess", (node) => reprocess(doc, node), { primary: true }));
   } else if (doc.status === "processed" && doc.validation?.outcome === "failed") {
     // The server also refuses this once vouchers have been generated from the document.
     cell.append(button("Reprocess", (node) => reprocess(
       doc, node, `Validation of “${doc.original_filename}” (#${doc.id}) failed. Read it again from the start? Corrections made on the Review page are not carried over.`,
-    )));
+    ), { primary: true }));
   }
   return cell;
 }
