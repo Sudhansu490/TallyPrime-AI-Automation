@@ -139,11 +139,17 @@ def _raise_status(result: FieldResult, status: Status) -> None:
         result.status = status
 
 
+_STATEMENT_BALANCES = {"opening_balance", "closing_balance"}
+_PLACEHOLDER = re.compile(r"^(?:[-–—_.*/\\]+|n/?a|nil|null|none)$", re.IGNORECASE)
+
+
 def build_field(
     spec: FieldSpec, raw: str | None, *, evidence: str | None, page: int | None, confidence: float | None,
     document: _DocumentText, low_confidence: float, evidence_is_row: bool = False,
 ) -> FieldResult:
     raw = raw.strip() if isinstance(raw, str) and raw.strip() else None
+    if raw is not None and _PLACEHOLDER.match(raw):
+        raw = None      # "-", "--", "NA", "nil" in a cell mean "nothing here", not a value
     parsed: Parsed = parse_value(raw, spec.value_type)
     result = FieldResult(
         name=spec.name, value_type=spec.value_type, raw=raw, value=parsed.value, status=parsed.status,
@@ -372,6 +378,13 @@ def extract_document(
             confidence=chosen.confidence if present else None,
             document=document, low_confidence=low_confidence,
         )
+        if (spec.name in _STATEMENT_BALANCES and result.raw is not None and chosen.evidence
+                and _looks_like_transaction(chosen.evidence) and "balance" not in chosen.evidence.lower()):
+            # The statement prints no such balance: the model took a transaction row's running balance.
+            result = build_field(spec, None, evidence=None, page=None, confidence=None,
+                                 document=document, low_confidence=low_confidence)
+            result.messages.append("Not printed on the statement (the AI offered a transaction's balance, "
+                                   "which was not used). Enter it if the statement shows it.")
         others = {
             c.value.strip() for c in present[1:]
             if parse_value(c.value, spec.value_type).value != result.value

@@ -5,7 +5,7 @@ from __future__ import annotations
 from extraction_fakes import FakeLlm, field, reply
 from tally_automation.db.models import DocumentType
 from tally_automation.extraction.service import PageInput, extract_document
-from tally_automation.extraction.table_amounts import fill_skipped_amounts
+from tally_automation.extraction.table_amounts import correct_amount_columns, fill_skipped_amounts
 
 HEADER = "Txn No. | Txn Date | Description | Dr Amount | Cr Amount | Balance"
 ROW_CREDIT = "S0000001 | 02-04-2026 | NEFT_IN:SYNB00000001/SYNTHETIC CUSTOMER |  | 2,500.00 | 12,500.00 Cr."
@@ -85,3 +85,30 @@ def test_worker_fills_a_skipped_amount_end_to_end(client) -> None:
     failed = {c["code"] for c in checks if not c["passed"]}
     assert not failed & {"no_amount", "running_balance", "closing_balance", "closing_last_row"}, failed
     assert any(c["code"] == "running_balance" and c["passed"] for c in checks)
+
+
+def test_an_amount_in_the_wrong_column_is_moved_to_the_printed_column() -> None:
+    result, pages = extract([row(ROW_DEBIT, credit="1,000.00", balance="10,000.00 Cr."),
+                             row(ROW_CREDIT, debit="2,500.00", balance="12,500.00 Cr.")])
+    assert correct_amount_columns(result, pages, low_confidence=0.8) == 2
+    debit_row, credit_row = result.rows
+    assert (debit_row.fields["debit"].value, debit_row.fields["credit"].raw) == ("1000.00", None)
+    assert (credit_row.fields["credit"].value, credit_row.fields["debit"].raw) == ("2500.00", None)
+    assert debit_row.fields["debit"].method == "table" and "column_corrected" in debit_row.fields["debit"].flags
+
+
+def test_a_stray_second_amount_is_cleared_and_right_rows_are_left_alone() -> None:
+    # The printed debit in the credit column, plus another number (a cheque number) in the debit column.
+    result, pages = extract([row(ROW_DEBIT, debit="123,456.00", credit="1,000.00"),
+                             row(ROW_CREDIT, credit="2,500.00")])
+    assert correct_amount_columns(result, pages, low_confidence=0.8) == 1
+    fixed, untouched = result.rows
+    assert (fixed.fields["debit"].value, fixed.fields["credit"].raw) == ("1000.00", None)
+    assert untouched.fields["credit"].method == "extracted"
+    # Right column plus a stray amount on the other side: the stray one is cleared.
+    result, pages = extract([row(ROW_DEBIT, debit="1,000.00", credit="77.00")])
+    assert correct_amount_columns(result, pages, low_confidence=0.8) == 1
+    assert (result.rows[0].fields["debit"].value, result.rows[0].fields["credit"].raw) == ("1000.00", None)
+    # A different amount than the table prints is never "corrected": the reviewer decides.
+    result, pages = extract([row(ROW_DEBIT, credit="9,999.00")])
+    assert correct_amount_columns(result, pages, low_confidence=0.8) == 0

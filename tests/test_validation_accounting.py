@@ -258,3 +258,18 @@ def test_dates_outside_period_and_repeated_rows() -> None:
 def test_statement_without_transactions_is_an_error() -> None:
     bad = failing(statement_checks(statement(), [], today=TODAY), "error")
     assert "no_transactions" in bad and "nothing to post" in bad["no_transactions"].message
+
+
+def test_unreadable_value_date_or_cheque_number_only_warns() -> None:
+    rows = copy.deepcopy(ROWS)
+    rows[0]["value_date"] = build(TRANSACTION_FIELDS, {"value_date": "229769"})["value_date"]
+    rows[1]["cheque_number"] = {**rows[1].get("cheque_number", {}), "raw": "999", "value": None, "status": "invalid",
+                                "messages": ["This value does not appear in the document text."]}
+    checks = statement_checks(statement(), rows, today=TODAY)
+    assert failing(checks, "error") == {}
+    warned = [c for c in checks if c.code == "value_invalid"]
+    assert {c.fields[0] for c in warned} == {"value_date", "cheque_number"}
+    assert all("not needed for vouchers" in c.message for c in warned)
+    # A transaction date that cannot be read is still an error.
+    rows[0]["txn_date"] = build(TRANSACTION_FIELDS, {"txn_date": "229769"})["txn_date"]
+    assert "value_invalid" in failing(statement_checks(statement(), rows, today=TODAY), "error")

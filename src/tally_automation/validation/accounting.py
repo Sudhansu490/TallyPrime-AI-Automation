@@ -36,7 +36,7 @@ from tally_automation.extraction.schemas import (
     INVOICE_FIELDS, LINE_ITEM_FIELDS, STATEMENT_FIELDS, TRANSACTION_FIELDS, FieldSpec,
 )
 
-RULES_VERSION = "2026-11-09.2"
+RULES_VERSION = "2026-11-10.1"
 
 PAISA = Decimal("0.01")
 ZERO = Decimal("0")
@@ -136,6 +136,10 @@ _LABELS = {spec.name: spec.label for spec in (
 )}
 
 
+# Transaction fields that never decide an amount, a date or a ledger of a voucher.
+INFORMATIONAL_FIELDS = {"value_date", "cheque_number"}
+
+
 def extraction_checks(
     specs: tuple[FieldSpec, ...], fields: Fields, *, row: int | None = None,
 ) -> list[Check]:
@@ -154,12 +158,19 @@ def extraction_checks(
                 message=message, row=row, fields=[spec.name], printed=meta.get("raw"),
             ))
 
+        # Fields only kept for reference: an unusable value is simply left out of the voucher (vouchers use
+        # only usable values), so it is a warning, not a reason to block the whole document.
+        informational = spec.name in INFORMATIONAL_FIELDS
         if "required_missing" in flags:
             add("required_missing", Severity.ERROR, f"{label} is required but was not found.")
         if meta.get("status") == "invalid":
-            add("value_invalid", Severity.ERROR, f"{label} cannot be used as read: {detail}".strip())
+            if informational:
+                add("value_invalid", Severity.WARNING,
+                    f"{label} cannot be used as read and is left out (not needed for vouchers): {detail}".strip())
+            else:
+                add("value_invalid", Severity.ERROR, f"{label} cannot be used as read: {detail}".strip())
         if "conflict" in flags:
-            add("value_conflict", Severity.ERROR,
+            add("value_conflict", Severity.WARNING if informational else Severity.ERROR,
                 f"{label}: different values were read on different pages; confirm the right one by editing it.")
         if meta.get("status") == "warning":
             add("value_warning", Severity.WARNING, f"{label}: {detail}".strip())

@@ -1,4 +1,4 @@
-"""Debit/credit amounts the LLM skipped, read from a ruled statement table.
+"""Debit/credit amounts the LLM skipped or put in the wrong column, read from a ruled statement table.
 
 PDF pages whose transactions sit in a table drawn with ruling lines reach the
 LLM as one line per table row, cells separated by `` | `` (see
@@ -15,6 +15,7 @@ header is ambiguous, the cell is not a plain amount, or both cells hold one.
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation
 
 from tally_automation.db.models import DocumentType
 from tally_automation.extraction.parsing import Status
@@ -107,3 +108,80 @@ def fill_skipped_amounts(
         filled += 1
     return filled
 
+
+
+def _number(text: str | None) -> Decimal | None:
+    try:
+        return Decimal(text.replace(",", "")) if text else None
+    except InvalidOperation:
+        return None
+
+
+def correct_amount_columns(
+    result: ExtractionResult, pages: list[PageInput], *, low_confidence: float,
+) -> int:
+    """Move an amount the model put in the wrong column (debit for credit, or the reverse).
+
+    Only when the row is a ruled table row whose debit/credit header is clear, exactly one of the two
+    cells holds an amount, and that printed amount equals the model's: then the printed column is the
+    truth, so the value is moved there and the other side is emptied. Nothing new is ever invented.
+    Returns the number of rows corrected.
+    """
+    if result.document_type is not DocumentType.BANK_STATEMENT:
+        return 0
+    columns = _amount_columns(pages)
+    if columns is None:
+        return 0
+    document = _DocumentText(pages)
+    corrected = 0
+    for row in result.rows:
+        debit, credit = row.fields.get("debit"), row.fields.get("credit")
+        if debit is None or credit is None or (debit.raw is None and credit.raw is None):
+            continue
+        line = _find_row(pages, row)
+        if line is None:
+            continue
+        cells = _cells(line)
+        found = {
+            name: cells[index] for name, index in zip(("debit", "credit"), columns)
+            if index < len(cells) and _AMOUNT.match(cells[index])
+        }
+        if len(found) != 1:
+            continue
+        side, printed = next(iter(found.items()))
+        other = "credit" if side == "debit" else "debit"
+        model = {"debit": _number(debit.value), "credit": _number(credit.value)}
+        if model[side] is not None and model[side] == _number(printed) and model[other] is not None:
+            # Right column, plus a stray amount in the other one that the statement leaves empty.
+            row.fields[other] = build_field(
+                _SPECS[other], None, evidence=None, page=row.page, confidence=None,
+                document=document, low_confidence=low_confidence, evidence_is_row=True,
+            )
+            row.fields[other].flags.append("column_corrected")
+            row.fields[other].messages.append(
+                f"The AI also put an amount in the {other} column; the statement leaves it empty, so it was cleared.")
+            corrected += 1
+            continue
+        if model[other] is None or model[other] != _number(printed):
+            continue          # already in the right column, or a different amount: leave it to review
+        # The printed amount is in the model's wrong column. The statement leaves that column empty, so
+        # anything the model put in the right column (e.g. a cheque number) is replaced by the printed cell.
+        moved = build_field(
+            _SPECS[side], printed, evidence=line.strip(), page=row.page, confidence=None,
+            document=document, low_confidence=low_confidence, evidence_is_row=True,
+        )
+        if moved.status is Status.INVALID:
+            continue
+        moved.method = "table"
+        moved.flags.append("column_corrected")
+        moved.messages.append(
+            f"The AI put this amount in the {other} column; the statement prints it in the {side} column, "
+            "so it was moved there."
+        )
+        row.fields[side] = moved
+        row.fields[other] = build_field(
+            _SPECS[other], None, evidence=None, page=row.page, confidence=None,
+            document=document, low_confidence=low_confidence, evidence_is_row=True,
+        )
+        corrected += 1
+    return corrected

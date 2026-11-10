@@ -265,3 +265,20 @@ def test_a_reply_cut_off_by_the_provider_is_split_into_halves() -> None:
     llm = FakeLlm(cut, json.dumps(empty), statement_page1_reply())
     result = run(statement_pages()[:1], STATEMENT, llm, pages_per_call=2)
     assert len(llm.requests) == 3 and len(result.rows) == 1
+
+
+def test_a_dash_in_a_cell_is_an_empty_field_not_an_invented_value() -> None:
+    body = json.loads(statement_page1_reply())
+    body["transactions"][0]["cheque_number"] = "-"
+    result = run(statement_pages()[:1], STATEMENT, FakeLlm(json.dumps(body)), pages_per_call=1)
+    cheque = result.rows[0].fields["cheque_number"]
+    assert (cheque.raw, cheque.status) == (None, Status.MISSING) and "value_not_in_document" not in cheque.flags
+
+
+def test_a_closing_balance_taken_from_a_transaction_row_is_not_used() -> None:
+    body = json.loads(statement_page1_reply())
+    row_line = "02/04/2026 NEFT SYNTHETIC VENDOR UTR123 5,000.00 5,000.00 Cr"
+    body["statement"]["closing_balance"] = {"value": "5,000.00", "evidence": row_line, "page": 1, "confidence": 0.9}
+    result = run(statement_pages()[:1], STATEMENT, FakeLlm(json.dumps(body)), pages_per_call=1)
+    closing = result.header["closing_balance"]
+    assert closing.raw is None and "Not printed on the statement" in " ".join(closing.messages)
