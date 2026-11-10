@@ -188,6 +188,10 @@ class RequestTooLarge(ExtractionError):
     """The LLM provider refused the request as larger than its per-minute token limit."""
 
 
+class OutputCutOff(ExtractionError):
+    """The reply hit the answer allowance, so rows could be missing: send less text per request."""
+
+
 def _batches(pages: list[PageInput], size: int) -> list[list[PageInput]]:
     usable = [p for p in pages if p.text.strip()]
     return [usable[i:i + size] for i in range(0, len(usable), size)]
@@ -221,6 +225,11 @@ def _call(
                 continue
             if exc.kind == "too_large":
                 raise RequestTooLarge(f"LLM request failed: {exc.message}") from exc
+            if exc.kind == "cut_off":
+                raise OutputCutOff(
+                    "The LLM output was cut off at the token limit, so rows could be missing. "
+                    "Lower LLM_PAGES_PER_CALL or raise LLM_MAX_OUTPUT_TOKENS."
+                ) from exc
             raise ExtractionError(f"LLM request failed: {exc.message}") from exc
         record["calls"] += 1
         record["prompt_tokens"] += response.prompt_tokens
@@ -229,7 +238,7 @@ def _call(
         if response.model not in record["models"]:
             record["models"].append(response.model)
         if response.finish_reason == "length":
-            raise ExtractionError(
+            raise OutputCutOff(
                 "The LLM output was cut off at the token limit, so rows could be missing. "
                 "Lower LLM_PAGES_PER_CALL or raise LLM_MAX_OUTPUT_TOKENS."
             )
@@ -294,9 +303,11 @@ def _call_in_pieces(
     """One page in one request; only if the provider refuses it as too large, in halves (recursively)."""
     try:
         return [(page, _call(client, document_type, [page], total_pages, model_cls, schema, record))]
-    except RequestTooLarge:
+    except (RequestTooLarge, OutputCutOff) as exc:
         halves = _halves(page) if depth < MAX_PAGE_SPLITS else None
         if halves is None:
+            if isinstance(exc, OutputCutOff):
+                raise
             raise _page_too_large(page) from None
         logger.warning("LLM request too large; sending the page in two halves",
                        extra={"page": page.page_number, "split": depth + 1})
@@ -334,9 +345,9 @@ def extract_document(
                 replies.append(_call(client, document_type, batch, len(pages), model_cls, json_schema, record))
                 sent.append(batch)
                 continue
-            except RequestTooLarge:
-                # Over the provider's per-minute limit (Groq's free plan): send these pages one at a time,
-                # and a page that is still refused in halves.
+            except (RequestTooLarge, OutputCutOff):
+                # Over the provider's per-minute limit (Groq's free plan), or the fitted answer allowance was
+                # too small for this much text: send these pages one at a time, and a page still refused in halves.
                 logger.warning("LLM request too large; sending its pages one at a time", extra={"pages": len(batch)})
         for page in batch:
             for piece, reply in _call_in_pieces(client, document_type, page, len(pages), model_cls, json_schema, record):

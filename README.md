@@ -794,7 +794,7 @@ without a matching migration.
 
 ## Configuration
 
-See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
+See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`, `LLM_API_KEY_SECONDARY`) are read as
 `SecretStr` and never appear in reprs or logs. Never commit `.env`.
 
 ## Architectural decisions

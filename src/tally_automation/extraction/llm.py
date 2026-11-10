@@ -23,6 +23,7 @@ Error handling:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -42,14 +43,23 @@ MAX_RATE_LIMIT_WAIT_SECONDS = 90.0
 # instead of failing. A long statement needs several such waits, so they are not counted as retries.
 PER_MINUTE_WINDOW_SECONDS = 61.0
 MAX_PER_MINUTE_WAITS = 10
+# Groq counts part of the answer allowance (max_completion_tokens) against the per-minute limit. Once a
+# request is refused as too large, the allowance is fitted to the limit Groq names: limit minus the
+# request's estimated size, never below MIN_OUTPUT_TOKENS.
+MIN_OUTPUT_TOKENS = 1500
+TOKEN_MARGIN = 300
+CHARS_PER_TOKEN = 2          # measured on statement text (digits, codes): about 2 characters per token
 # How long the main model is skipped after a daily-limit error that names no time.
 DEFAULT_DAILY_BLOCK_SECONDS = 3600.0
 _DAILY_LIMIT = re.compile(r"per day|\((?:TPD|RPD)\)", re.IGNORECASE)
+_CUT_OFF = re.compile(r"max completion tokens|max_completion_tokens|truncated", re.IGNORECASE)
+_LIMIT = re.compile(r"Limit (\d+)")
 _PER_MINUTE_LIMIT = re.compile(r"per minute|\((?:TPM|RPM)\)", re.IGNORECASE)
 _TRY_AGAIN = re.compile(r"try again in\s+((?:\d+(?:\.\d+)?(?:ms|[hms])\s*)+)", re.IGNORECASE)
 
 # "too_large": the request is bigger than the provider allows per minute; send less text per request.
-ErrorKind = Literal["transient", "invalid_output", "too_large", "fatal"]
+# "cut_off": the reply ran out of answer allowance before it was complete; send less text per request.
+ErrorKind = Literal["transient", "invalid_output", "too_large", "cut_off", "fatal"]
 
 
 class LlmError(Exception):
@@ -122,6 +132,7 @@ class GroqClient:
         self, *, api_key: str, model: str, timeout: float, reasoning_effort: str,
         max_output_tokens: int, max_retries: int, base_url: str | None = None,
         fallback_model: str | None = None, sleep: Any = time.sleep, clock: Any = time.monotonic,
+        secondary_api_key: str | None = None,
     ) -> None:
         from groq import Groq
 
@@ -132,10 +143,25 @@ class GroqClient:
         self.max_retries = max_retries
         self._sleep = sleep
         self._clock = clock
-        # The main model is skipped until this clock value after a daily-limit error.
-        self._main_blocked_until: float | None = None
+        # Per-minute token limit learned from a "request too large" refusal, per (key, model).
+        self._minute_limit: dict[tuple[int, str], int] = {}
+        # Per key: the main model is skipped until this clock value after a daily-limit error.
+        self._main_blocked: dict[int, float] = {}
+        # Per key: the whole key (both models) is skipped until this clock value.
+        self._key_blocked: dict[int, float] = {}
         # SDK retries are disabled so this class owns the retry policy and its logs.
-        self._client = Groq(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
+        # Key 0 is LLM_API_KEY; key 1, if set, LLM_API_KEY_SECONDARY (another Groq account).
+        keys = [api_key] + ([secondary_api_key] if secondary_api_key and secondary_api_key != api_key else [])
+        self._clients = [Groq(api_key=k, base_url=base_url, timeout=timeout, max_retries=0) for k in keys]
+        self._key = 0
+
+    @property
+    def _client(self) -> Any:
+        return self._clients[self._key]
+
+    @_client.setter
+    def _client(self, value: Any) -> None:
+        self._clients[self._key] = value
 
     def complete_json(
         self, system: str, user: str, schema_name: str, schema: dict[str, Any],
@@ -157,20 +183,32 @@ class GroqClient:
                         "name": schema_name, "strict": True, "schema": schema,
                     }},
                     reasoning_effort=self.reasoning_effort,
-                    max_completion_tokens=self.max_output_tokens,
+                    max_completion_tokens=self._output_budget(model, system, user, schema),
                     temperature=0,
                 )
             except groq.RateLimitError as exc:
                 _, message = _error_detail(exc)
                 full_message = _error_detail(exc, limit=2000)[1]
                 if _is_daily_limit(full_message):
+                    block = _try_again_seconds(full_message) or _retry_after(exc) or DEFAULT_DAILY_BLOCK_SECONDS
                     if model == self.model and self.fallback_model:
                         # Waiting cannot help: switch now. Not counted as a retry.
-                        block = _try_again_seconds(full_message) or _retry_after(exc) or DEFAULT_DAILY_BLOCK_SECONDS
-                        self._main_blocked_until = self._clock() + block
+                        self._main_blocked[self._key] = self._clock() + block
                         logger.warning("daily LLM limit reached; using the fallback model",
                                        extra={"model": model, "fallback_model": self.fallback_model,
-                                              "blocked_seconds": round(block)})
+                                              "blocked_seconds": round(block), "api_key": self._key_label()})
+                        attempt -= 1
+                        continue
+                    other = self._other_key()
+                    if other is not None:
+                        # Both models of this key are over their daily limit: use the other Groq account's key
+                        # until one of them is free again.
+                        free_at = min(self._main_blocked.get(self._key, float("inf")), self._clock() + block)
+                        self._key_blocked[self._key] = free_at
+                        logger.warning("daily LLM limits reached on this API key; using the other key",
+                                       extra={"api_key": self._key_label(), "next_api_key": self._key_label(other),
+                                              "blocked_seconds": round(free_at - self._clock())})
+                        self._key = other
                         attempt -= 1
                         continue
                     raise LlmError(
@@ -194,10 +232,23 @@ class GroqClient:
                 error = LlmError(f"{type(exc).__name__}: {_error_detail(exc)[1]}", kind="transient")
             except groq.APIStatusError as exc:
                 code, message = _error_detail(exc)
+                if code == "json_validate_failed" and _CUT_OFF.search(_error_detail(exc, limit=2000)[1]):
+                    # Groq reports a reply cut short by max_completion_tokens as a schema failure.
+                    raise LlmError(f"Groq cut the reply off at the answer allowance: {message}", kind="cut_off") from None
                 if code == "json_validate_failed":
                     raise LlmError(f"Groq rejected the reply as not matching the schema: {message}",
                                    kind="invalid_output") from None
-                if exc.status_code == 413 and _PER_MINUTE_LIMIT.search(_error_detail(exc, limit=2000)[1]):
+                full = _error_detail(exc, limit=2000)[1]
+                if exc.status_code == 413 and _PER_MINUTE_LIMIT.search(full):
+                    limit = _LIMIT.search(full)
+                    if limit and self._minute_limit.get((self._key, model)) != int(limit.group(1)):
+                        # First refusal: fit the answer allowance to the limit and send again at once.
+                        self._minute_limit[(self._key, model)] = int(limit.group(1))
+                        attempt -= 1
+                        logger.warning("LLM request too large; fitting the answer allowance to the per-minute limit",
+                                       extra={"model": model, "limit": self._minute_limit[(self._key, model)],
+                                              "max_output_tokens": self._output_budget(model, system, user, schema)})
+                        continue
                     if minute_waits < MAX_PER_MINUTE_WAITS and not waited_for_size:
                         # Often the tokens just used still count: after a full minute it may fit.
                         waited_for_size = True
@@ -228,13 +279,39 @@ class GroqClient:
                            extra={"attempt": attempt, "delay_seconds": delay, "error": error.message})
             self._sleep(delay)
 
+    def _output_budget(self, model: str, system: str, user: str, schema: dict[str, Any]) -> int:
+        """The answer allowance: the configured one, or (once Groq has named its per-minute limit) what
+        fits under that limit next to this request."""
+        limit = self._minute_limit.get((self._key, model))
+        if limit is None:
+            return self.max_output_tokens
+        prompt = (len(system) + len(user) + len(json.dumps(schema))) // CHARS_PER_TOKEN
+        return min(self.max_output_tokens, max(MIN_OUTPUT_TOKENS, limit - prompt - TOKEN_MARGIN))
+
+    def _key_label(self, key: int | None = None) -> str:
+        return "primary" if (self._key if key is None else key) == 0 else "secondary"
+
+    def _other_key(self) -> int | None:
+        """Another API key that is not itself over its daily limits, if any."""
+        now = self._clock()
+        for key in range(len(self._clients)):
+            if key != self._key and now >= self._key_blocked.get(key, 0.0):
+                return key
+        return None
+
     def _current_model(self) -> str:
-        """The main model, or the fallback while the main one is over its daily limit."""
-        if self._main_blocked_until is not None:
-            if self.fallback_model and self._clock() < self._main_blocked_until:
+        """The main model, or the fallback while the main one is over its daily limit; on the primary key
+        whenever it has a model free again."""
+        now = self._clock()
+        if self._key != 0 and now >= self._key_blocked.get(0, 0.0):
+            self._key = 0
+            logger.info("using the primary LLM API key again")
+        until = self._main_blocked.get(self._key)
+        if until is not None:
+            if self.fallback_model and now < until:
                 return self.fallback_model
-            self._main_blocked_until = None
-            logger.info("trying the main LLM model again", extra={"model": self.model})
+            del self._main_blocked[self._key]
+            logger.info("trying the main LLM model again", extra={"model": self.model, "api_key": self._key_label()})
         return self.model
 
 
@@ -251,5 +328,7 @@ def create_llm_client(settings: Settings) -> LlmClient | None:
             timeout=settings.llm_timeout_seconds, reasoning_effort=settings.llm_reasoning_effort,
             max_output_tokens=settings.llm_max_output_tokens, max_retries=settings.llm_max_retries,
             base_url=settings.llm_base_url, fallback_model=settings.llm_fallback_model,
+            secondary_api_key=(settings.llm_api_key_secondary.get_secret_value()
+                               if settings.llm_api_key_secondary is not None else None),
         )
     raise ValueError(f"unsupported LLM provider {settings.llm_provider}")  # pragma: no cover

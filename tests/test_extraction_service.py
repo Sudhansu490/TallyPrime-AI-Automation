@@ -148,9 +148,11 @@ def test_invalid_replies_are_never_accepted(bad: str) -> None:
         run(invoice_pages(), INVOICE, FakeLlm(bad, bad))
 
 
-def test_truncated_output_fails() -> None:
+def test_truncated_output_is_split_and_fails_only_when_parts_are_still_cut_off() -> None:
+    llm = FakeLlm(*[invoice_reply()] * 20, finish_reason="length")
     with pytest.raises(ExtractionError, match="cut off"):
-        run(invoice_pages(), INVOICE, FakeLlm(invoice_reply(), finish_reason="length"))
+        run(invoice_pages(), INVOICE, llm)
+    assert len(llm.requests) > 1                     # the page was halved before giving up
 
 
 def test_llm_errors_fail_cleanly() -> None:
@@ -254,3 +256,12 @@ def test_a_page_too_large_even_in_parts_explains_the_plan_limit() -> None:
     too_large = LlmError("Groq rejected the request as too large for its per-minute limit", kind="too_large")
     with pytest.raises(ExtractionError, match="Part of page 1 is still larger than the AI provider allows"):
         run(statement_pages()[:1], STATEMENT, FakeLlm(*[too_large] * 20), pages_per_call=2)
+
+
+def test_a_reply_cut_off_by_the_provider_is_split_into_halves() -> None:
+    cut = LlmError("Groq cut the reply off at the answer allowance", kind="cut_off")
+    empty = json.loads(statement_page1_reply())
+    empty["transactions"] = []
+    llm = FakeLlm(cut, json.dumps(empty), statement_page1_reply())
+    result = run(statement_pages()[:1], STATEMENT, llm, pages_per_call=2)
+    assert len(llm.requests) == 3 and len(result.rows) == 1

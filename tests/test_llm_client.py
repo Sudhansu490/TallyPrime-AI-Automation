@@ -186,17 +186,35 @@ def test_per_minute_waits_do_not_use_up_retries() -> None:
     assert len(calls) == 4 and sleeps == [23.0, 23.0, 23.0]
 
 
-def test_too_large_request_waits_a_minute_once_then_is_too_large() -> None:
+def test_too_large_request_fits_the_answer_allowance_then_waits_then_is_too_large() -> None:
     too_large = status_error(groq.APIStatusError, 413, {"error": {"message": TOO_LARGE_MESSAGE}})
+    # 1st refusal: the allowance (1000 configured here) is fitted to "Limit 8000" and sent again at once.
     client, calls, sleeps = client_with([too_large, ok_response()])
-    client.complete_json("s", "u", "n", {})                     # fits after the minute's usage has passed
-    assert len(calls) == 2 and sleeps == [61.0]
+    client.complete_json("s", "u", "n", {})
+    assert len(calls) == 2 and sleeps == []
 
-    client, calls, sleeps = client_with([too_large, too_large])
+    client, calls, sleeps = client_with([too_large, too_large, ok_response()])
+    client.complete_json("s", "u", "n", {})                     # fits after the minute's usage has passed
+    assert len(calls) == 3 and sleeps == [61.0]
+
+    client, calls, sleeps = client_with([too_large, too_large, too_large])
     with pytest.raises(LlmError) as excinfo:
         client.complete_json("s", "u", "n", {})
     assert excinfo.value.kind == "too_large" and "per-minute limit" in excinfo.value.message
-    assert len(calls) == 2 and sleeps == [61.0]
+    assert len(calls) == 3 and sleeps == [61.0]
+
+
+def test_fitted_allowance_leaves_room_for_the_request_under_the_limit() -> None:
+    too_large = status_error(groq.APIStatusError, 413, {"error": {"message": TOO_LARGE_MESSAGE}})
+    client, calls, _ = client_with([too_large, ok_response(), ok_response()])
+    client.max_output_tokens = 32000
+    user = "x" * 6000                                           # about 3,000 tokens
+    client.complete_json("s", user, "n", {})
+    assert calls[0]["max_completion_tokens"] == 32000           # nothing learned yet: the configured allowance
+    fitted = calls[1]["max_completion_tokens"]
+    assert 1500 <= fitted <= 8000 - 3000 and fitted < 32000
+    client.complete_json("s", "x" * 100, "n", {})               # later requests use the learned limit at once
+    assert 1500 < calls[2]["max_completion_tokens"] <= 8000
 
 
 def test_other_413_errors_stay_fatal() -> None:
@@ -205,3 +223,69 @@ def test_other_413_errors_stay_fatal() -> None:
     with pytest.raises(LlmError) as excinfo:
         client.complete_json("s", "u", "n", {})
     assert excinfo.value.kind == "fatal" and sleeps == [] and len(calls) == 1
+
+
+def test_a_reply_cut_off_at_the_allowance_is_reported_as_cut_off() -> None:
+    # Groq reports this as a schema failure; it must not be retried as a malformed reply.
+    cut = status_error(groq.APIStatusError, 400, {"error": {
+        "code": "json_validate_failed",
+        "message": "max completion tokens reached before generating a valid document: the output was truncated to fit "
+                   "max_completion_tokens and is missing required content. Increase max_completion_tokens.",
+        "failed_generation": DOCUMENT_ECHO}})
+    client, calls, _ = client_with([cut])
+    with pytest.raises(LlmError) as excinfo:
+        client.complete_json("s", "u", "n", {})
+    assert excinfo.value.kind == "cut_off" and DOCUMENT_ECHO not in excinfo.value.message and len(calls) == 1
+
+
+def two_key_client(outcomes):
+    """A client with a primary and a secondary key; each call records which key served it."""
+    now = [1000.0]
+    client = GroqClient(api_key="synthetic-primary-key", secondary_api_key="synthetic-secondary-key", model="main-model",
+                        fallback_model="fallback-model", timeout=5, reasoning_effort="low", max_output_tokens=1000,
+                        max_retries=3, sleep=lambda s: None, clock=lambda: now[0])
+    calls: list[tuple[str, str]] = []
+
+    def fake(label):
+        def create(**kwargs):
+            calls.append((label, kwargs["model"]))
+            item = outcomes.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    client._clients = [fake("primary"), fake("secondary")]
+    return client, calls, now
+
+
+def test_secondary_key_is_used_after_both_models_hit_the_daily_limit() -> None:
+    client, calls, now = two_key_client([
+        daily_limit(), daily_limit("fallback-model"), ok_response(), ok_response(), ok_response()])
+    client.complete_json("s", "u", "n", {})
+    assert calls == [("primary", "main-model"), ("primary", "fallback-model"), ("secondary", "main-model")]
+    client.complete_json("s", "u", "n", {})                      # stays on the secondary key meanwhile
+    assert calls[-1] == ("secondary", "main-model")
+    now[0] += 4000                                               # the primary key's main model is free again
+    client.complete_json("s", "u", "n", {})
+    assert calls[-1] == ("primary", "main-model")
+
+
+def test_daily_limits_on_both_keys_fail_without_waiting() -> None:
+    client, calls, _ = two_key_client([
+        daily_limit(), daily_limit("fallback-model"), daily_limit(), daily_limit("fallback-model")])
+    with pytest.raises(LlmError) as excinfo:
+        client.complete_json("s", "u", "n", {})
+    assert excinfo.value.kind == "transient" and "daily limit" in excinfo.value.message
+    assert [label for label, _ in calls] == ["primary", "primary", "secondary", "secondary"]
+
+
+def test_secondary_key_is_configured_from_settings_and_never_logged() -> None:
+    settings = Settings(_env_file=None, llm_provider="groq", llm_api_key="synthetic-primary-key",
+                        llm_api_key_secondary="synthetic-secondary-key")
+    client = create_llm_client(settings)
+    assert len(client._clients) == 2
+    assert "synthetic-secondary-key" not in repr(settings)
+    single = create_llm_client(Settings(_env_file=None, llm_provider="groq", llm_api_key="synthetic-primary-key",
+                                        llm_api_key_secondary=""))
+    assert len(single._clients) == 1
