@@ -170,3 +170,38 @@ def test_fallback_model_is_configured_from_settings() -> None:
     assert create_llm_client(same).fallback_model is None
     blank = Settings(_env_file=None, llm_provider="groq", llm_api_key="synthetic-test-key", llm_fallback_model=" ")
     assert create_llm_client(blank).fallback_model is None
+
+
+TPM_MESSAGE = ("Rate limit reached for model `m` in organization `org_synthetic` service tier `on_demand` on tokens "
+               "per minute (TPM): Limit 8000, Used 7000, Requested 4000. Please try again in 22.5s.")
+TOO_LARGE_MESSAGE = ("Request too large for model `m` in organization `org_synthetic` service tier `on_demand` on "
+                     "tokens per minute (TPM): Limit 8000, Requested 15557, please reduce your message size and try again.")
+
+
+def test_per_minute_waits_do_not_use_up_retries() -> None:
+    minute = status_error(groq.RateLimitError, 429, {"error": {"message": TPM_MESSAGE}}, {"retry-after": "23"})
+    # More per-minute waits than retries: a long statement needs several, and they all succeed in the end.
+    client, calls, sleeps = client_with([minute, minute, minute, ok_response()], max_retries=1)
+    client.complete_json("s", "u", "n", {})
+    assert len(calls) == 4 and sleeps == [23.0, 23.0, 23.0]
+
+
+def test_too_large_request_waits_a_minute_once_then_is_too_large() -> None:
+    too_large = status_error(groq.APIStatusError, 413, {"error": {"message": TOO_LARGE_MESSAGE}})
+    client, calls, sleeps = client_with([too_large, ok_response()])
+    client.complete_json("s", "u", "n", {})                     # fits after the minute's usage has passed
+    assert len(calls) == 2 and sleeps == [61.0]
+
+    client, calls, sleeps = client_with([too_large, too_large])
+    with pytest.raises(LlmError) as excinfo:
+        client.complete_json("s", "u", "n", {})
+    assert excinfo.value.kind == "too_large" and "per-minute limit" in excinfo.value.message
+    assert len(calls) == 2 and sleeps == [61.0]
+
+
+def test_other_413_errors_stay_fatal() -> None:
+    too_big = status_error(groq.APIStatusError, 413, {"error": {"message": "Request Entity Too Large"}})
+    client, calls, sleeps = client_with([too_big])
+    with pytest.raises(LlmError) as excinfo:
+        client.complete_json("s", "u", "n", {})
+    assert excinfo.value.kind == "fatal" and sleeps == [] and len(calls) == 1

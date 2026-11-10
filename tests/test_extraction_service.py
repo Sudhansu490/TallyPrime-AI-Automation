@@ -223,3 +223,18 @@ def test_fallback_model_use_is_reported_for_review() -> None:
 def test_main_model_use_is_not_reported() -> None:
     result = run(invoice_pages(), INVOICE, FakeLlm(invoice_reply()))
     assert result.model == "fake-model" and result.document_check_issues == []
+
+
+def test_too_large_request_is_split_into_single_pages() -> None:
+    too_large = LlmError("Groq rejected the request as too large for its per-minute limit", kind="too_large")
+    llm = FakeLlm(too_large, statement_page1_reply(), statement_page2_reply())
+    result = run(statement_pages(), STATEMENT, llm, pages_per_call=2)
+    assert len(llm.requests) == 3                                   # the 2-page request, then each page alone
+    assert "=== Page 1 ===" in llm.requests[1]["user"] and "=== Page 2 ===" not in llm.requests[1]["user"]
+    assert len(result.rows) == 2
+
+
+def test_a_single_page_too_large_explains_the_plan_limit() -> None:
+    too_large = LlmError("Groq rejected the request as too large for its per-minute limit", kind="too_large")
+    with pytest.raises(ExtractionError, match="Page 1 alone is larger than the AI provider allows per minute"):
+        run(statement_pages()[:1], STATEMENT, FakeLlm(too_large), pages_per_call=2)

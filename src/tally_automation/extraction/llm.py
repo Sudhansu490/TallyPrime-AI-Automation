@@ -38,12 +38,18 @@ DEFAULT_MODELS = {
     "groq": "openai/gpt-oss-120b",
 }
 MAX_RATE_LIMIT_WAIT_SECONDS = 90.0
+# Per-minute limits (Groq's free plan: a few thousand tokens per minute): wait for the window to pass
+# instead of failing. A long statement needs several such waits, so they are not counted as retries.
+PER_MINUTE_WINDOW_SECONDS = 61.0
+MAX_PER_MINUTE_WAITS = 10
 # How long the main model is skipped after a daily-limit error that names no time.
 DEFAULT_DAILY_BLOCK_SECONDS = 3600.0
 _DAILY_LIMIT = re.compile(r"per day|\((?:TPD|RPD)\)", re.IGNORECASE)
+_PER_MINUTE_LIMIT = re.compile(r"per minute|\((?:TPM|RPM)\)", re.IGNORECASE)
 _TRY_AGAIN = re.compile(r"try again in\s+((?:\d+(?:\.\d+)?(?:ms|[hms])\s*)+)", re.IGNORECASE)
 
-ErrorKind = Literal["transient", "invalid_output", "fatal"]
+# "too_large": the request is bigger than the provider allows per minute; send less text per request.
+ErrorKind = Literal["transient", "invalid_output", "too_large", "fatal"]
 
 
 class LlmError(Exception):
@@ -137,6 +143,8 @@ class GroqClient:
         import groq
 
         attempt = 0
+        minute_waits = 0
+        waited_for_size = False
         while True:
             attempt += 1
             wait: float | None = None
@@ -173,6 +181,15 @@ class GroqClient:
                     ) from None
                 error = LlmError(f"Groq rate limit: {message}", kind="transient")
                 wait = _retry_after(exc)
+                if _PER_MINUTE_LIMIT.search(full_message) and minute_waits < MAX_PER_MINUTE_WAITS:
+                    # The per-minute allowance is used up: wait for it, without using up a retry.
+                    minute_waits += 1
+                    attempt -= 1
+                    delay = min(max(wait or _try_again_seconds(full_message) or 0.0, 1.0), PER_MINUTE_WINDOW_SECONDS)
+                    logger.warning("LLM per-minute limit reached; waiting", extra={
+                        "model": model, "delay_seconds": round(delay, 1), "wait": minute_waits})
+                    self._sleep(delay)
+                    continue
             except (groq.APITimeoutError, groq.APIConnectionError, groq.InternalServerError) as exc:
                 error = LlmError(f"{type(exc).__name__}: {_error_detail(exc)[1]}", kind="transient")
             except groq.APIStatusError as exc:
@@ -180,6 +197,18 @@ class GroqClient:
                 if code == "json_validate_failed":
                     raise LlmError(f"Groq rejected the reply as not matching the schema: {message}",
                                    kind="invalid_output") from None
+                if exc.status_code == 413 and _PER_MINUTE_LIMIT.search(_error_detail(exc, limit=2000)[1]):
+                    if minute_waits < MAX_PER_MINUTE_WAITS and not waited_for_size:
+                        # Often the tokens just used still count: after a full minute it may fit.
+                        waited_for_size = True
+                        minute_waits += 1
+                        attempt -= 1
+                        logger.warning("LLM request too large for the per-minute limit; waiting a minute",
+                                       extra={"model": model, "delay_seconds": PER_MINUTE_WINDOW_SECONDS})
+                        self._sleep(PER_MINUTE_WINDOW_SECONDS)
+                        continue
+                    raise LlmError(f"Groq rejected the request as too large for its per-minute limit: {message}",
+                                   kind="too_large") from None
                 # Bad request, authentication, request too large: not retryable.
                 raise LlmError(f"Groq rejected the request (HTTP {exc.status_code}): {message}") from None
             else:

@@ -184,6 +184,10 @@ def build_field(
 
 # ---- Orchestration --------------------------------------------------------------------
 
+class RequestTooLarge(ExtractionError):
+    """The LLM provider refused the request as larger than its per-minute token limit."""
+
+
 def _batches(pages: list[PageInput], size: int) -> list[list[PageInput]]:
     usable = [p for p in pages if p.text.strip()]
     return [usable[i:i + size] for i in range(0, len(usable), size)]
@@ -215,6 +219,8 @@ def _call(
                 last_problem = exc.message
                 logger.warning("LLM reply rejected by provider schema check")
                 continue
+            if exc.kind == "too_large":
+                raise RequestTooLarge(f"LLM request failed: {exc.message}") from exc
             raise ExtractionError(f"LLM request failed: {exc.message}") from exc
         record["calls"] += 1
         record["prompt_tokens"] += response.prompt_tokens
@@ -263,6 +269,13 @@ def _looks_like_transaction(line: str) -> bool:
     return bool(date) and bool(_AMOUNT.search(line[date.end():] + " " + line[:date.start()]))
 
 
+def _page_too_large(page: PageInput) -> ExtractionError:
+    return ExtractionError(
+        f"Page {page.page_number} alone is larger than the AI provider allows per minute (the Groq free plan's "
+        "token limit). Upgrade the Groq plan (Developer tier) and process the document again."
+    )
+
+
 def extract_document(
     pages: list[PageInput], document_type: DocumentType, client: LlmClient,
     *, pages_per_call: int, low_confidence: float,
@@ -277,9 +290,25 @@ def extract_document(
 
     started = time.perf_counter()
     record: dict[str, Any] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "raw": [], "models": []}
-    replies = [
-        _call(client, document_type, batch, len(pages), model_cls, json_schema, record) for batch in batches
-    ]
+    replies = []
+    sent: list[list[PageInput]] = []
+    for batch in batches:
+        try:
+            replies.append(_call(client, document_type, batch, len(pages), model_cls, json_schema, record))
+            sent.append(batch)
+            continue
+        except RequestTooLarge:
+            if len(batch) == 1:
+                raise _page_too_large(batch[0]) from None
+            # Over the provider's per-minute limit (Groq's free plan): send these pages one at a time.
+            logger.warning("LLM request too large; sending its pages one at a time", extra={"pages": len(batch)})
+        for page in batch:
+            try:
+                replies.append(_call(client, document_type, [page], len(pages), model_cls, json_schema, record))
+            except RequestTooLarge:
+                raise _page_too_large(page) from None
+            sent.append([page])
+    batches = sent
 
     issues = [
         f"Pages {batch[0].page_number}-{batch[-1].page_number}: {reply.document_check.reason or 'not the expected document type'}"
