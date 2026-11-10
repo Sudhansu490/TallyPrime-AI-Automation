@@ -319,8 +319,13 @@ a.btn { text-decoration: none; }
 .table .filename { min-width: 9rem; max-width: 18rem; overflow-wrap: anywhere; font-weight: 550; }
 .table .details { min-width: 16rem; max-width: 28rem; }
 .table progress { width: 7rem; accent-color: var(--primary); }
-.row-actions { white-space: nowrap; }
-.row-actions > * { margin: 0 0.3rem 0.3rem 0; }
+/* Row buttons stacked in a column that stays at the table's right edge, even when the table scrolls. */
+.table .row-actions, .table th.actions-col {
+  position: sticky; right: 0; z-index: 1; min-width: 8.5rem; box-shadow: inset 1px 0 0 var(--border);
+}
+.table td.row-actions { background: var(--surface); }
+.row-actions > * { display: block; width: 100%; margin: 0 0 0.35rem; text-align: center; }
+.row-actions > *:last-child { margin-bottom: 0; }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 0.75rem; margin-top: 0.85rem; }
 
 @media (max-width: 900px) {
