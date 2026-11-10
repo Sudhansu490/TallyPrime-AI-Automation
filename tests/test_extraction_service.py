@@ -175,3 +175,51 @@ def test_rows_array_is_described_for_the_model() -> None:
     schema = llm_json_schema(INVOICE)
     assert schema["properties"]["line_items"]["description"].startswith("JSON array")
     assert "line item" in schema["properties"]["line_items"]["description"]
+
+
+def empty_statement_reply() -> str:
+    body = json.loads(statement_page1_reply())
+    body["transactions"] = []
+    return json.dumps(body)
+
+
+def test_empty_transaction_list_is_retried_once_when_text_has_dated_amounts() -> None:
+    llm = FakeLlm(empty_statement_reply(), statement_page1_reply())
+    result = run(statement_pages()[:1], STATEMENT, llm)
+    assert result.calls == 2 and len(result.rows) == 1
+    assert "Note: this text has 1 line(s) containing both a date and an amount" in llm.requests[1]["user"]
+    assert result.document_check_issues == []
+
+
+def test_empty_transaction_list_twice_is_reported_not_retried_forever() -> None:
+    llm = FakeLlm(empty_statement_reply(), empty_statement_reply())
+    result = run(statement_pages()[:1], STATEMENT, llm)
+    assert result.calls == 2 and result.rows == []
+    assert result.document_check_issues == ["No transactions were found."]
+
+
+def test_empty_retry_keeps_the_malformed_reply_retry() -> None:
+    llm = FakeLlm(empty_statement_reply(), "{not json", statement_page1_reply())
+    result = run(statement_pages()[:1], STATEMENT, llm)
+    assert result.calls == 3 and len(result.rows) == 1
+
+
+def test_statement_without_dated_amounts_is_not_retried() -> None:
+    pages = [PageInput(1, "SYNTHETIC BANK - TEST STATEMENT - NOT REAL\nNo transactions in this period")]
+    llm = FakeLlm(empty_statement_reply())
+    result = run(pages, STATEMENT, llm)
+    assert result.calls == 1 and result.rows == []
+
+
+def test_fallback_model_use_is_reported_for_review() -> None:
+    llm = FakeLlm(invoice_reply())
+    llm.model = "openai/gpt-oss-120b"
+    llm.reply_model = "openai/gpt-oss-20b"
+    result = run(invoice_pages(), INVOICE, llm)
+    assert result.model == "openai/gpt-oss-20b"
+    assert any("fallback model openai/gpt-oss-20b" in issue for issue in result.document_check_issues)
+
+
+def test_main_model_use_is_not_reported() -> None:
+    result = run(invoice_pages(), INVOICE, FakeLlm(invoice_reply()))
+    assert result.model == "fake-model" and result.document_check_issues == []

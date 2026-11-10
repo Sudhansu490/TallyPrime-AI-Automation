@@ -122,11 +122,12 @@ class FakeLlm:
         self.replies = list(replies)
         self.finish_reason = finish_reason
         self.requests: list[dict[str, Any]] = []
+        self.reply_model: str | None = None  # model the provider reports, when not the requested one
 
     def complete_json(self, system: str, user: str, schema_name: str, schema: dict[str, Any]) -> LlmResponse:
         self.requests.append({"system": system, "user": user, "schema_name": schema_name, "schema": schema})
         item = self.replies.pop(0)
         if isinstance(item, LlmError):
             raise item
-        return LlmResponse(content=item, model=self.model, prompt_tokens=100, completion_tokens=50,
+        return LlmResponse(content=item, model=self.reply_model or self.model, prompt_tokens=100, completion_tokens=50,
                            finish_reason=self.finish_reason)

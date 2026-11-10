@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     # stop at text_extracted and nothing leaves Computer A.
     llm_provider: str | None = None
     llm_model: str | None = None          # blank = the provider's default model
+    # Used while the main model is over its DAILY limit (each model has its own
+    # quota). Blank = no fallback. Groq: openai/gpt-oss-20b (less accurate).
+    llm_fallback_model: str | None = None
     llm_api_key: SecretStr | None = None
     llm_base_url: str | None = None
     llm_timeout_seconds: float = Field(default=60, gt=0)
@@ -124,7 +127,7 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "secret_key", "llm_provider", "llm_model", "llm_api_key",
+        "secret_key", "llm_provider", "llm_model", "llm_fallback_model", "llm_api_key",
         "llm_base_url", "tally_host", "tally_company",
         mode="before",
     )

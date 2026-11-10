@@ -195,8 +195,17 @@ def _call(
 ) -> BaseModel:
     system = system_prompt(document_type)
     user = user_message([(p.page_number, p.text) for p in batch], total_pages)
+    # Statement pages with lines that hold a date and an amount: an empty
+    # transaction list for them is a model slip, retried once.
+    expected_rows = (
+        sum(_looks_like_transaction(line) for p in batch for line in p.text.splitlines())
+        if document_type is DocumentType.BANK_STATEMENT else 0
+    )
+    empty_retried = False
     last_problem = ""
-    for _ in range(2):  # one retry for a malformed reply; transport retries live in the client
+    attempt = 0
+    while attempt < 2:  # one retry for a malformed reply; transport retries live in the client
+        attempt += 1
         try:
             response = client.complete_json(system, user, f"{document_type.value}_extraction", schema)
         except LlmError as exc:
@@ -211,18 +220,47 @@ def _call(
         record["prompt_tokens"] += response.prompt_tokens
         record["completion_tokens"] += response.completion_tokens
         record["raw"].append(response.content)
-        record["model"] = response.model
+        if response.model not in record["models"]:
+            record["models"].append(response.model)
         if response.finish_reason == "length":
             raise ExtractionError(
                 "The LLM output was cut off at the token limit, so rows could be missing. "
                 "Lower LLM_PAGES_PER_CALL or raise LLM_MAX_OUTPUT_TOKENS."
             )
         try:
-            return model_cls.model_validate_json(response.content)
+            reply = model_cls.model_validate_json(response.content)
         except ValidationError as exc:
             last_problem = f"{exc.error_count()} schema error(s), first: {exc.errors()[0]['msg']}"
             logger.warning("LLM reply failed validation", extra={"problem": last_problem})
+            continue
+        if expected_rows and not empty_retried and not getattr(reply, "transactions", None):
+            # Ask once more; this retry does not use up the malformed-reply retry.
+            empty_retried = True
+            attempt -= 1
+            logger.warning("LLM returned no transactions for statement text with dated amounts; retrying",
+                           extra={"candidate_lines": expected_rows})
+            user = user + (
+                f"\n\nNote: this text has {expected_rows} line(s) containing both a date and an amount. "
+                "Check whether they are transaction rows and, if so, return each of them."
+            )
+            continue
+        return reply
     raise ExtractionError(f"The LLM reply did not match the required schema ({last_problem}).")
+
+
+def _same_model(reported: str, requested: str) -> bool:
+    """Providers may report a model without its vendor prefix (gpt-oss-120b vs openai/gpt-oss-120b)."""
+    return reported == requested or requested.endswith("/" + reported) or reported.endswith("/" + requested)
+
+
+_DATE = re.compile(r"\b\d{1,2}[-/. ](?:\d{1,2}|[A-Za-z]{3,9})[-/. ]\d{2,4}\b")
+_AMOUNT = re.compile(r"\d\.\d{2}\b")
+
+
+def _looks_like_transaction(line: str) -> bool:
+    """A line holding a date and a money amount (two decimals)."""
+    date = _DATE.search(line)
+    return bool(date) and bool(_AMOUNT.search(line[date.end():] + " " + line[:date.start()]))
 
 
 def extract_document(
@@ -238,7 +276,7 @@ def extract_document(
         raise ExtractionError("There is no text to extract from.")
 
     started = time.perf_counter()
-    record: dict[str, Any] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "raw": [], "model": client.model}
+    record: dict[str, Any] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "raw": [], "models": []}
     replies = [
         _call(client, document_type, batch, len(pages), model_cls, json_schema, record) for batch in batches
     ]
@@ -292,10 +330,16 @@ def extract_document(
 
     if document_type is DocumentType.BANK_STATEMENT and not rows:
         issues.append("No transactions were found.")
+    other_models = [m for m in record["models"] if not _same_model(m, client.model)]
+    if other_models:
+        issues.append(
+            f"Read by the fallback model {', '.join(other_models)} because {client.model} had reached its "
+            "daily limit. It is less accurate: check every value against the document."
+        )
 
     return ExtractionResult(
         document_type=document_type, header=header, rows=rows, document_check_issues=issues,
-        provider=client.provider, model=record["model"], prompt_version=PROMPT_VERSION,
+        provider=client.provider, model=", ".join(record["models"]) or client.model, prompt_version=PROMPT_VERSION,
         calls=record["calls"], prompt_tokens=record["prompt_tokens"],
         completion_tokens=record["completion_tokens"], seconds=round(time.perf_counter() - started, 2),
         raw_responses=record["raw"],

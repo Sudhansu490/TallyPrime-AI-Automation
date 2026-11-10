@@ -102,3 +102,71 @@ def test_create_llm_client_configuration() -> None:
     assert (client.provider, client.model) == ("groq", "openai/gpt-oss-120b")
     with pytest.raises(ValueError, match="unsupported LLM_PROVIDER"):
         Settings(_env_file=None, llm_provider="someother")
+
+
+DAILY = (
+    "Rate limit reached for model `{model}` in organization `org_synthetic` service tier `on_demand` "
+    "on tokens per day (TPD): Limit 200000, Used 199000, Requested 8871. Please try again in 1h2m3.5s. "
+    "Need more tokens? Upgrade to Dev Tier today."
+)
+
+
+def daily_limit(model: str = "main-model"):
+    return status_error(groq.RateLimitError, 429,
+                        {"error": {"message": DAILY.format(model=model), "code": "rate_limit_exceeded"}},
+                        {"retry-after": "3723"})
+
+
+def fallback_client(outcomes):
+    now = [1000.0]
+    client, calls, sleeps = client_with(outcomes)
+    client.model, client.fallback_model = "main-model", "fallback-model"
+    client._clock = lambda: now[0]
+    return client, calls, sleeps, now
+
+
+def test_daily_limit_switches_to_fallback_at_once_and_stays_there() -> None:
+    client, calls, sleeps, now = fallback_client([daily_limit(), ok_response(), ok_response(), ok_response()])
+    client.complete_json("s", "u", "n", {})
+    assert [c["model"] for c in calls] == ["main-model", "fallback-model"] and sleeps == []
+    now[0] += 3600  # still inside the 1h2m3.5s the provider asked for
+    client.complete_json("s", "u", "n", {})
+    assert calls[-1]["model"] == "fallback-model"
+    now[0] += 200  # past it: the main model is tried again
+    client.complete_json("s", "u", "n", {})
+    assert calls[-1]["model"] == "main-model"
+
+
+def test_daily_limit_on_fallback_fails_without_waiting() -> None:
+    client, calls, sleeps, _ = fallback_client([daily_limit(), daily_limit("fallback-model")])
+    with pytest.raises(LlmError) as excinfo:
+        client.complete_json("s", "u", "n", {})
+    assert "daily limit reached for fallback-model" in excinfo.value.message
+    assert len(calls) == 2 and sleeps == []
+
+
+def test_daily_limit_without_fallback_fails_without_waiting() -> None:
+    client, calls, sleeps = client_with([daily_limit()])
+    with pytest.raises(LlmError) as excinfo:
+        client.complete_json("s", "u", "n", {})
+    assert "set LLM_FALLBACK_MODEL" in excinfo.value.message and len(calls) == 1 and sleeps == []
+
+
+def test_per_minute_limit_still_waits_on_the_main_model() -> None:
+    minute = status_error(groq.RateLimitError, 429, {"error": {
+        "message": "Rate limit reached on tokens per minute (TPM): Limit 8000, Requested 8871. Please try again in 6.6s."
+    }}, {"retry-after": "7"})
+    client, calls, sleeps, _ = fallback_client([minute, ok_response()])
+    client.complete_json("s", "u", "n", {})
+    assert [c["model"] for c in calls] == ["main-model", "main-model"] and sleeps == [7.0]
+
+
+def test_fallback_model_is_configured_from_settings() -> None:
+    settings = Settings(_env_file=None, llm_provider="groq", llm_api_key="synthetic-test-key",
+                        llm_fallback_model="openai/gpt-oss-20b")
+    assert create_llm_client(settings).fallback_model == "openai/gpt-oss-20b"
+    same = Settings(_env_file=None, llm_provider="groq", llm_api_key="synthetic-test-key",
+                    llm_fallback_model="openai/gpt-oss-120b")
+    assert create_llm_client(same).fallback_model is None
+    blank = Settings(_env_file=None, llm_provider="groq", llm_api_key="synthetic-test-key", llm_fallback_model=" ")
+    assert create_llm_client(blank).fallback_model is None

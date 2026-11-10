@@ -223,6 +223,13 @@ account numbers on statements) is sent to the provider.
 and one of the two Groq models with strict (constrained) JSON-schema output. Temperature 0,
 `LLM_REASONING_EFFORT=medium`.
 
+**Fallback model.** Each Groq model has its own daily quota (gpt-oss-120b: 200,000 tokens/day on
+the free tier, about 20-25 invoices). When the main model reports a *daily* limit, requests
+switch at once to `LLM_FALLBACK_MODEL` (`openai/gpt-oss-20b`) and stay there until Groq says the
+main model is available again; per-minute limits still just wait. A document read by the
+fallback is labelled with that model and gets a validation warning to check every value. If the
+fallback is exhausted too, processing fails at once with a clear message (no pointless waiting).
+
 **What the LLM does, and what it does not.** It only *transcribes*: every value comes back as the
 string printed on the document, with a verbatim evidence quote, its page and a confidence. It
 never converts, calculates, maps ledgers or posts anything. The prompt tells it to use null for
@@ -839,7 +846,7 @@ See `.env.example`. Secrets (`SECRET_KEY`, `LLM_API_KEY`) are read as
 | `paddlepaddle 2.6.2` needs `protobuf<=3.20.2` | A newer protobuf breaks Paddle import | `constraints.txt` pins 3.20.2 |
 | `opencv-python`, `opencv-contrib-python` and `opencv-python-headless` are all installed | They share one `cv2` module (currently 4.11.0, working) | Kept deliberately: PaddleOCR 2.9.1 requires the first two and albumentations requires the headless one, so removing any breaks `pip check` and a reinstall brings it back. `test_real_paddleocr_reads_synthetic_text` proves the combination works. Revisit with PaddleOCR 3.x |
 | Streamlit 1.66 and pyarrow 26 are still installed in `tally_env` (from the earlier UI) | Unused; pyarrow 26 needs NumPy ≥2 | No longer a project dependency. Optional: `pip uninstall streamlit pyarrow` |
-| Groq account limit: 8,000 tokens/minute for gpt-oss-120b | One document uses ~4–7k tokens, so about one document per minute; extra documents wait | The client waits for Groq's `retry-after` (up to 90 s, `LLM_MAX_RETRIES` times). For volume, a paid Groq tier |
+| Groq account limit: 8,000 tokens/minute for gpt-oss-120b | One document uses ~4–7k tokens, so about one document per minute; extra documents wait | The client waits for Groq's `retry-after` (up to 90 s, `LLM_MAX_RETRIES` times). Daily limit (200k tokens): `LLM_FALLBACK_MODEL` takes over. For volume, a paid Groq tier |
 | OCR can misread letters as similar digits (`SOS` → `s0s`) with high confidence | The value itself cannot be checked against anything but the page | Reviewer compares with the document. Duplicate detection maps look-alikes, so a misread copy of a known invoice is still matched; arithmetic checks catch misread amounts |
 | Duplicate candidates are compared in Python after an indexed pre-filter (GSTIN, date, amount; account and dates) | Fine for thousands of documents | Revisit with a normalised invoice-number column if volume grows |
 | Validation results become outdated if the rules change | Stored results keep their `rules_version` | **Run validation again** (or `POST /documents/{id}/validate`) re-checks without an LLM call |
