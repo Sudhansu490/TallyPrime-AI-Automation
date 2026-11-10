@@ -234,7 +234,23 @@ def test_too_large_request_is_split_into_single_pages() -> None:
     assert len(result.rows) == 2
 
 
-def test_a_single_page_too_large_explains_the_plan_limit() -> None:
+def test_a_refused_page_is_sent_in_two_halves_that_never_split_a_row() -> None:
     too_large = LlmError("Groq rejected the request as too large for its per-minute limit", kind="too_large")
-    with pytest.raises(ExtractionError, match="Page 1 alone is larger than the AI provider allows per minute"):
-        run(statement_pages()[:1], STATEMENT, FakeLlm(too_large), pages_per_call=2)
+    empty = json.loads(statement_page1_reply())
+    empty["transactions"] = []
+    llm = FakeLlm(too_large, json.dumps(empty), statement_page1_reply())    # header half, then the rows half
+    result = run(statement_pages()[:1], STATEMENT, llm, pages_per_call=2)
+    first, second = llm.requests[1]["user"], llm.requests[2]["user"]
+    whole = statement_pages()[0].text
+    # Each half is sent as the same page; together they hold every line of it, and the cut is before a row.
+    assert "=== Page 1 ===" in first and "=== Page 1 ===" in second
+    body = lambda u: u.split("=== Page 1 ===\n", 1)[1].split("\n\n=== End of text ===")[0]
+    assert body(first) + "\n" + body(second) == whole
+    assert body(second).splitlines()[0].startswith("02/04/2026")
+    assert len(result.rows) == 1 and result.rows[0].fields["debit"].value == "5000.00"
+
+
+def test_a_page_too_large_even_in_parts_explains_the_plan_limit() -> None:
+    too_large = LlmError("Groq rejected the request as too large for its per-minute limit", kind="too_large")
+    with pytest.raises(ExtractionError, match="Part of page 1 is still larger than the AI provider allows"):
+        run(statement_pages()[:1], STATEMENT, FakeLlm(*[too_large] * 20), pages_per_call=2)

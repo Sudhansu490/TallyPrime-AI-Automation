@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -269,10 +269,46 @@ def _looks_like_transaction(line: str) -> bool:
     return bool(date) and bool(_AMOUNT.search(line[date.end():] + " " + line[:date.start()]))
 
 
+MAX_PAGE_SPLITS = 3     # a refused page is halved, then (if needed) halved again: at most 8 parts
+
+
+def _halves(page: PageInput) -> tuple[PageInput, PageInput] | None:
+    """The page's text in two halves of whole lines, cut where a transaction row starts so a row is
+    never torn apart. None if it cannot be split further."""
+    lines = page.text.splitlines()
+    if len(lines) < 2:
+        return None
+    middle = len(lines) // 2
+    starts = [i for i in range(1, len(lines)) if _looks_like_transaction(lines[i])]
+    cut = min(starts, key=lambda i: abs(i - middle)) if starts else middle
+    first, second = "\n".join(lines[:cut]), "\n".join(lines[cut:])
+    if not first.strip() or not second.strip():
+        return None
+    return replace(page, text=first), replace(page, text=second)
+
+
+def _call_in_pieces(
+    client: LlmClient, document_type: DocumentType, page: PageInput, total_pages: int,
+    model_cls: type[BaseModel], schema: dict[str, Any], record: dict[str, Any], depth: int = 0,
+) -> list[tuple[PageInput, BaseModel]]:
+    """One page in one request; only if the provider refuses it as too large, in halves (recursively)."""
+    try:
+        return [(page, _call(client, document_type, [page], total_pages, model_cls, schema, record))]
+    except RequestTooLarge:
+        halves = _halves(page) if depth < MAX_PAGE_SPLITS else None
+        if halves is None:
+            raise _page_too_large(page) from None
+        logger.warning("LLM request too large; sending the page in two halves",
+                       extra={"page": page.page_number, "split": depth + 1})
+        return [part for half in halves for part in _call_in_pieces(
+            client, document_type, half, total_pages, model_cls, schema, record, depth + 1)]
+
+
 def _page_too_large(page: PageInput) -> ExtractionError:
     return ExtractionError(
-        f"Page {page.page_number} alone is larger than the AI provider allows per minute (the Groq free plan's "
-        "token limit). Upgrade the Groq plan (Developer tier) and process the document again."
+        f"Part of page {page.page_number} is still larger than the AI provider allows per minute (the Groq "
+        "free plan's token limit), even after splitting the page into smaller parts. Process the document "
+        "again later, or upgrade the Groq plan (Developer tier)."
     )
 
 
@@ -293,21 +329,19 @@ def extract_document(
     replies = []
     sent: list[list[PageInput]] = []
     for batch in batches:
-        try:
-            replies.append(_call(client, document_type, batch, len(pages), model_cls, json_schema, record))
-            sent.append(batch)
-            continue
-        except RequestTooLarge:
-            if len(batch) == 1:
-                raise _page_too_large(batch[0]) from None
-            # Over the provider's per-minute limit (Groq's free plan): send these pages one at a time.
-            logger.warning("LLM request too large; sending its pages one at a time", extra={"pages": len(batch)})
-        for page in batch:
+        if len(batch) > 1:
             try:
-                replies.append(_call(client, document_type, [page], len(pages), model_cls, json_schema, record))
+                replies.append(_call(client, document_type, batch, len(pages), model_cls, json_schema, record))
+                sent.append(batch)
+                continue
             except RequestTooLarge:
-                raise _page_too_large(page) from None
-            sent.append([page])
+                # Over the provider's per-minute limit (Groq's free plan): send these pages one at a time,
+                # and a page that is still refused in halves.
+                logger.warning("LLM request too large; sending its pages one at a time", extra={"pages": len(batch)})
+        for page in batch:
+            for piece, reply in _call_in_pieces(client, document_type, page, len(pages), model_cls, json_schema, record):
+                replies.append(reply)
+                sent.append([piece])
     batches = sent
 
     issues = [
