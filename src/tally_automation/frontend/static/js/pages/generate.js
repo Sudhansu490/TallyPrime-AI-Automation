@@ -306,7 +306,7 @@ async function loadDocuments() {
     clear(select);
     select.append(option(data.items.length ? "Choose a document…" : "No processed documents yet", ""));
     for (const doc of data.items) {
-      select.append(option(`#${doc.id} · ${DOCUMENT_TYPE_LABELS[doc.document_type]} · ${doc.original_filename}`, String(doc.id)));
+      select.append(option(`${doc.serial ?? doc.id}. ${DOCUMENT_TYPE_LABELS[doc.document_type]} · ${doc.original_filename} (document #${doc.id})`, String(doc.id)));
     }
     if (state.documentId) select.value = String(state.documentId);
   } catch (error) {

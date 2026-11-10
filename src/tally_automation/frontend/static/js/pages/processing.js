@@ -188,8 +188,12 @@ function renderRows(items) {
   for (const doc of items) {
     const job = doc.latest_job;
     body.append(el("tr", { className: doc.id === state.focus ? "row-focus" : "" }, [
-      el("td", { text: doc.id }),
-      el("td", { className: "filename", text: doc.original_filename }),
+      el("td", { text: doc.serial ?? doc.id }),
+      el("td", { className: "filename" }, [
+        el("div", { text: doc.original_filename }),
+        // The document number stays as it is: TallyPrime narrations refer to it.
+        el("div", { className: "small muted", text: `Document #${doc.id}` }),
+      ]),
       el("td", { text: DOCUMENT_TYPE_LABELS[doc.document_type] ?? doc.document_type }),
       el("td", { text: formatDateTime(doc.uploaded_at) }),
       el("td", {}, [statusBadge(doc.status)]),
@@ -248,6 +252,7 @@ async function fetchList() {
   if (state.focus === null) return api.get(query());
   if (!state.lastLoaded) showMessage($("list-message"), "loading", `Loading document #${state.focus}…`);
   const doc = await api.get(`/documents/${state.focus}`);
+  $("focus-text").textContent = `Showing S.No ${doc.serial ?? doc.id} (document #${doc.id}) only. `;
   return { items: [doc], total: 1 };
 }
 

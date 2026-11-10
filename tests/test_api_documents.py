@@ -204,3 +204,18 @@ def test_same_origin_upload_allowed(client: TestClient) -> None:
 def test_cross_site_get_is_not_blocked(client: TestClient) -> None:
     # Safe methods change nothing; the browser's same-origin policy keeps responses private.
     assert client.get("/api/v1/documents/stats", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 200
+
+
+def test_serial_numbers_follow_upload_order_and_close_gaps(client: TestClient) -> None:
+    for n in range(4):
+        assert upload(client, make_pdf(f"SYNTHETIC SERIAL {n}"), f"serial{n}.pdf").status_code == 201
+    # Earlier documents removed (as test data was): the remaining ones are numbered 1, 2, 3 again.
+    from sqlalchemy import text
+    with client.app.state.session_factory.begin() as session:
+        session.execute(text("delete from processing_jobs where document_id = 1"))
+        session.execute(text("delete from documents where id = 1"))
+    items = client.get("/api/v1/documents").json()["items"]
+    assert [(d["id"], d["serial"]) for d in items] == [(4, 3), (3, 2), (2, 1)]   # ids unchanged
+    page = client.get("/api/v1/documents", params={"limit": 1, "offset": 1}).json()["items"]
+    assert [(d["id"], d["serial"]) for d in page] == [(3, 2)]                    # same on every page
+    assert client.get("/api/v1/documents/4").json()["serial"] == 3

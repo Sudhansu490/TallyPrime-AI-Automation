@@ -78,6 +78,9 @@ class DuplicateEvidence(BaseModel):
 
 class DocumentOut(BaseModel):
     id: int
+    # Position among all documents, oldest first (1, 2, 3 ...), for display only. ``id`` stays the
+    # document number: voucher narrations in TallyPrime refer to it ("from document #12").
+    serial: int
     document_type: DocumentType
     original_filename: str
     status: DocumentStatus
@@ -169,7 +172,16 @@ def _job_out(job: ProcessingJob) -> JobOut:
     )
 
 
-def _document_out(document: Document, validation: DocumentValidationOut | None = None) -> DocumentOut:
+def _serials(session: Session, ids: list[int]) -> dict[int, int]:
+    """Serial number (1 = oldest) of each of these documents among all documents."""
+    if not ids:
+        return {}
+    ranked = select(Document.id, func.row_number().over(order_by=Document.id).label("serial")).subquery()
+    return dict(session.execute(select(ranked.c.id, ranked.c.serial).where(ranked.c.id.in_(ids))).all())
+
+
+def _document_out(document: Document, validation: DocumentValidationOut | None = None,
+                  serial: int | None = None) -> DocumentOut:
     duplicate = None
     if document.duplicate_of is not None:
         original = document.duplicate_of
@@ -185,7 +197,7 @@ def _document_out(document: Document, validation: DocumentValidationOut | None =
             ),
         )
     return DocumentOut(
-        id=document.id, document_type=document.document_type,
+        id=document.id, serial=serial if serial is not None else document.id, document_type=document.document_type,
         original_filename=document.original_filename, status=document.status,
         uploaded_at=document.created_at,
         file=FileOut(
@@ -208,7 +220,8 @@ def _load_document(session: Session, document_id: int) -> DocumentOut | None:
     document = session.scalar(_document_query().where(Document.id == document_id))
     if document is None:
         return None
-    return _document_out(document, document_validations(session, [document_id]).get(document_id))
+    return _document_out(document, document_validations(session, [document_id]).get(document_id),
+                         _serials(session, [document_id]).get(document_id))
 
 
 def _error(status_code: int, detail: str, code: str | None = None) -> JSONResponse:
@@ -312,8 +325,10 @@ def list_documents(
         _document_query().where(*conditions).order_by(Document.id.desc()).limit(limit).offset(offset)
     ).all()
     validations = document_validations(session, [d.id for d in documents])
+    serials = _serials(session, [d.id for d in documents])
     return DocumentList(
-        items=[_document_out(d, validations.get(d.id)) for d in documents], total=total, limit=limit, offset=offset,
+        items=[_document_out(d, validations.get(d.id), serials.get(d.id)) for d in documents],
+        total=total, limit=limit, offset=offset,
     )
 
 

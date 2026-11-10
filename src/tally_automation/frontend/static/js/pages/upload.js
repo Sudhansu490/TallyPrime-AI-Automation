@@ -62,7 +62,7 @@ function renderResult(item) {
   if (item.message) cell.append(el("div", { className: "small", text: item.message }));
   if (item.documentId) {
     // Opens the Processing page on exactly this uploaded document.
-    cell.append(el("div", { className: "small muted", text: `Document #${item.documentId}` }));
+    cell.append(el("div", { className: "small muted", text: `S.No ${item.serial} · document #${item.documentId}` }));
     cell.append(el("a", {
       className: "btn btn-small", text: "Processing",
       attrs: { href: `/processing?document=${item.documentId}`, title: `Show the processing of document #${item.documentId}` },
@@ -136,6 +136,7 @@ async function uploadOne(item) {
     });
     item.progress = 1;
     item.documentId = doc.id;
+    item.serial = doc.serial ?? doc.id;
     if (doc.status === "duplicate") {
       item.status = "duplicate";
       const original = doc.duplicate.duplicate_of;

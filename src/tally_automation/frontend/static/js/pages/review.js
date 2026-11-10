@@ -343,7 +343,7 @@ async function loadDocuments() {
     select.append(el("option", { text: data.items.length ? "Choose a document…" : "No processed documents yet", attrs: { value: "" } }));
     for (const doc of data.items) {
       select.append(el("option", {
-        text: `#${doc.id} · ${DOCUMENT_TYPE_LABELS[doc.document_type]} · ${doc.original_filename}`,
+        text: `${doc.serial ?? doc.id}. ${DOCUMENT_TYPE_LABELS[doc.document_type]} · ${doc.original_filename} (document #${doc.id})`,
         attrs: { value: String(doc.id) },
       }));
     }
