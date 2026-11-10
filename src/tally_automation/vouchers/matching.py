@@ -25,6 +25,7 @@ Rules, in order of strength:
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -47,6 +48,7 @@ CATEGORY_LABELS = {
     "cash": "cash withdrawal or deposit",
     "interest": "interest",
     "housing_loan": "housing loan",
+    "salary": "salary",
 }
 
 
@@ -103,6 +105,8 @@ def category(description: str | None) -> str | None:
         return "charges"
     if re.search(r"\bINT(?:EREST)?\b|INT\.?PD|INT\.?COLL", text):
         return "interest"
+    if re.search(r"\bSALARY\b|\bSALARIES\b|\bWAGES\b", text):
+        return "salary"
     if re.search(r"\bSELF\b|CASHWD|CASH WDL|CASH WITHDRAW|\bATM\b|\bCWDR\b|CASH DEP|BY CASH|\bCASH\b", text):
         return "cash"
     return None
@@ -173,6 +177,10 @@ def _by_category(masters: Masters, kind: str) -> list[Candidate]:
         return _unique(in_hand + named_cash)
     if kind == "interest":
         return [Candidate(l, "Interest ledger") for l in ledgers if "interest" in l.name.lower()]
+    if kind == "salary":
+        salary = [l for l in ledgers if re.search(r"salar|wage", l.name, re.IGNORECASE)]
+        salary.sort(key=lambda l: (not masters.in_groups(l, {"Indirect Expenses", "Direct Expenses"}), l.name.lower()))
+        return [Candidate(l, "Salary ledger") for l in salary]
     if kind == "housing_loan":
         loans = [l for l in ledgers if "housing loan" in " ".join(words(l.name)) or "home loan" in " ".join(words(l.name))]
         # The loan itself (under Loans (Liability)) first; an interest ledger last.
@@ -293,6 +301,87 @@ def party_in_narration(masters: Masters, description: str | None, money_out: boo
     return None
 
 
+# ---- Payee names in transfer narrations ("NEFT_OUT:<ref>/<NAME>/<IFSC>/<account>") ----------------
+
+SIMILAR = "Similar spelling of the party name in the narration"
+LOOKS_SIMILAR = "Name looks similar to the narration's party: check"
+SIMILAR_MIN, LOOKS_SIMILAR_MIN = 0.85, 0.70
+_TRANSFER = re.compile(r"^\s*(?:NEFT|N?RTGS|IMPS|UPI|NEFT_OUT|NEFT_IN|RTGS_OUT|RTGS_IN|INF|INFT|TRF|FT|MOB)\b",
+                       re.IGNORECASE)
+_IFSC = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$", re.IGNORECASE)
+_REFERENCE_WORD = re.compile(r"^(?:null|return|rtn|ref|utr)$", re.IGNORECASE)
+
+
+def party_segments(description: str | None) -> list[str]:
+    """The parts of a transfer narration that read like a party's name, as printed: no references,
+    IFSC codes or account numbers."""
+    text = description or ""
+    if not _TRANSFER.match(text):
+        return []
+    out = []
+    for segment in re.split(r"[/:]", text)[1:]:
+        segment = " ".join(segment.split()).strip(" -.")
+        letters = re.sub(r"[^A-Za-z]", "", segment)
+        if (len(letters) < 3 or _IFSC.match(segment) or sum(ch.isdigit() for ch in segment) > len(letters)
+                or all(_REFERENCE_WORD.match(w) for w in re.findall(r"[A-Za-z]+", segment))):
+            continue
+        out.append(segment)
+    return out
+
+
+# Words many business names share: similarity is judged on the rest of the name ("RAM" vs "ZETA" in
+# "RAM TRADERS" / "Zeta Traders"), never on these.
+_COMMON_BUSINESS_WORDS = {
+    "traders", "trading", "enterprises", "enterprise", "electricals", "electrical", "electric", "electronics",
+    "industries", "industry", "agency", "agencies", "store", "stores", "corporation", "corp", "services",
+    "service", "solutions", "sons", "brothers", "bros", "associates", "international", "india", "works",
+    "hardware", "construction", "constructions", "infra", "power", "steel", "motors", "marketing", "suppliers",
+    "supply", "and", "mart", "center", "centre", "engineering", "engineers", "group",
+}
+
+
+def _compact(text: str) -> str:
+    return "".join(w for w in name_tokens(text) if w not in _NOISE and w not in _COMMON_BUSINESS_WORDS)
+
+
+def _by_similar_name(masters: Masters, description: str, money_out: bool | None,
+                     minimum: float) -> list[tuple[float, Candidate]]:
+    """Ledgers whose name is spelled almost like a party name in the narration (banks shorten and
+    misspell names: "KORVNDELL" for "Korvandell")."""
+    phrases = [p for p in (_compact(s) for s in party_segments(description)) if len(p) >= 5]
+    if not phrases:
+        return []
+    preferred = {"Sundry Creditors"} if money_out else {"Sundry Debtors"} if money_out is False else set()
+    found = []
+    for ledger in masters.ledgers.values():
+        if masters.is_duty(ledger) or masters.in_groups(ledger, BANK_ACCOUNT_GROUPS):
+            continue
+        names = [n for n in (_compact(x) for x in [ledger.name, *(ledger.aliases or [])]) if len(n) >= 4]
+        pairs = [(SequenceMatcher(None, p, n).ratio(), min(len(p), len(n))) for p in phrases for n in names]
+        score, letters = max(pairs, default=(0.0, 0))
+        if score >= minimum:
+            rank = 0 if preferred and masters.in_groups(ledger, preferred) else 1
+            found.append((score, rank, letters, ledger))
+    found.sort(key=lambda t: (-round(t[0], 2), t[1], t[3].name.lower()))
+    # Pre-filled only when it is clear: long enough to tell names apart, and no other ledger as close.
+    close = [t for t in found if t[0] >= SIMILAR_MIN]
+    clear = len(close) == 1 or (len(close) > 1 and round(close[0][0], 2) > round(close[1][0], 2))
+    out = []
+    for i, (score, _, letters, ledger) in enumerate(found):
+        strong = i == 0 and score >= SIMILAR_MIN and letters >= 7 and clear
+        out.append((score, Candidate(ledger, SIMILAR if strong else LOOKS_SIMILAR)))
+    return out
+
+
+def new_party_name(description: str | None) -> str | None:
+    """The payee's name as the narration prints it, for a new ledger, if it has one."""
+    for segment in party_segments(description):
+        name = " ".join(re.sub(r"[^A-Za-z0-9&.,()' -]", " ", segment).split())
+        if len(re.sub(r"[^A-Za-z]", "", name)) >= 3:
+            return name[:100]
+    return None
+
+
 def counter_ledgers(masters: Masters, description: str | None, money_out: bool | None,
                     bank_guids: set[str]) -> list[Candidate]:
     """Candidate 'other' ledgers for one bank transaction."""
@@ -301,5 +390,9 @@ def counter_ledgers(masters: Masters, description: str | None, money_out: bool |
     kind = category(text)
     if kind is not None:
         out += _by_category(masters, kind)
-    out += _by_name(masters, text, money_out)
+    named = _by_name(masters, text, money_out)
+    out += named
+    if not out:
+        # No ledger with the narration's party name: a close spelling of it, then names that look similar.
+        out += [c for _, c in _by_similar_name(masters, text, money_out, LOOKS_SIMILAR_MIN)]
     return [c for c in _unique(out) if c.ledger.guid not in bank_guids]

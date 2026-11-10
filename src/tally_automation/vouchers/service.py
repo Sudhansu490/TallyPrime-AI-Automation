@@ -275,6 +275,7 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
     bank = _dedupe(bank)
     bank_guids = {s.guid for s in bank[:1] if s.guid}
     counter: dict[str, list[dict[str, Any]]] = {}
+    groups = set(creatable_groups(masters))
     for p in plans:
         key = description_key(p.description)
         options: list[Suggestion] = []
@@ -303,8 +304,15 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
                 Suggestion(s.guid, s.name, f"Chosen last time for {matching.CATEGORY_LABELS[kind]}", s.parent, s.gstin)
                 for s in _memory_suggestion(session, masters, MappingPurpose.COUNTER, category_key(kind))
             ]
-        options += [_suggest(c.ledger, c.reason)
-                    for c in matching.counter_ledgers(masters, p.description, p.money_out, bank_guids)]
+        rules = matching.counter_ledgers(masters, p.description, p.money_out, bank_guids)
+        options += [_suggest(c.ledger, c.reason) for c in rules]
+        if not any(o.reason != matching.LOOKS_SIMILAR for o in options):
+            # Nothing names this payee: offer the narration's own party name as a new ledger, created in
+            # TallyPrime on import (the reviewer checks the name and group first).
+            name = matching.new_party_name(p.description)
+            if name:
+                group = "Sundry Debtors" if p.money_out is False else "Sundry Creditors"
+                options.insert(0, Suggestion(None, name, NEW_FROM_NARRATION, group if group in groups else None))
         counter[str(p.transaction_id)] = [s.to_json() for s in _dedupe(options)]
     return {
         "bank": [s.to_json() for s in bank],
@@ -399,6 +407,7 @@ class NewLedger:
 
 
 NEW_LEDGER_PREFIX = "new:"
+NEW_FROM_NARRATION = "New ledger from the narration: created in TallyPrime on import"
 NEW_LEDGER_MAX_NAME = 100
 # A new ledger may not be a bank, cash or tax ledger: those need details (account numbers, tax heads)
 # that are set up in TallyPrime itself.

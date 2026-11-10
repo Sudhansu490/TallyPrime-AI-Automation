@@ -29,6 +29,9 @@ const NEW = "__new__";
  * select as "New ledger: …" with a group to create it under; it is created in TallyPrime on import.
  */
 function ledgerPicker(label, suggestions = [], onChange = null, newLedger = null) {
+  // A suggestion without a GUID is a new ledger named after the narration's party (statement rows only).
+  const proposed = newLedger ? suggestions.find((s) => !s.guid) : null;
+  suggestions = suggestions.filter((s) => s.guid);
   const select = el("select", { attrs: { "aria-label": label, required: "" } });
   const search = el("input", {
     className: "picker-search",
@@ -36,7 +39,7 @@ function ledgerPicker(label, suggestions = [], onChange = null, newLedger = null
   });
   const suggested = el("optgroup", { attrs: { label: "Suggested" } });
   const results = el("optgroup", { attrs: { label: "Search results" } });
-  select.append(option(suggestions.length ? "Choose a ledger…" : "No suggestion — search below", ""));
+  select.append(option(suggestions.length || proposed ? "Choose a ledger…" : "No suggestion — search below", ""));
   for (const s of suggestions) suggested.append(option(`${s.name} — ${s.reason}${s.parent ? ` (${s.parent})` : ""}`, s.guid));
   if (suggestions.length) select.append(suggested);
   select.append(results);
@@ -68,6 +71,17 @@ function ledgerPicker(label, suggestions = [], onChange = null, newLedger = null
   };
   select.addEventListener("change", showNote);
   groupSelect.addEventListener("change", showNote);
+  if (proposed) {
+    // Pre-fill the narration's party name as a new ledger; the name stays editable in the search box.
+    search.value = proposed.name;
+    freshOption.textContent = `New ledger: “${proposed.name}” (created in TallyPrime on import)`;
+    fresh.hidden = false;
+    if (proposed.parent && (newLedger.groups ?? []).includes(proposed.parent)) groupSelect.value = proposed.parent;
+    select.value = NEW;
+    showNote();
+    note.textContent = `Pre-filled: no ledger matches this party, so a new ledger “${proposed.name}” is proposed from the ` +
+      `narration${suggestions.length ? ` · ${suggestions.length} similar ledger(s) in the list` : ""}. Check the name and group, or pick an existing ledger.`;
+  }
 
   let timer = null;
   search.addEventListener("input", () => {
@@ -189,7 +203,7 @@ function renderStatement(setup) {
     const newLedger = { groups: s.ledger_groups ?? [], group: t.money_out === false ? "Sundry Debtors" : "Sundry Creditors" };
     const picker = usable ? ledgerPicker(`Other ledger for transaction ${t.sequence}`, s.counter[String(t.id)] ?? [], () => { box.checked = true; }, newLedger) : null;
     box.disabled = !usable;
-    box.checked = Boolean(usable && picker.value());
+    box.checked = Boolean(usable && (picker.value() || picker.newLedger()));
     const description = el("td", { className: "details" }, [el("span", { text: t.description ?? dash })]);
     if (t.reference) description.append(el("div", { className: "small muted", text: `Ref ${t.reference}` }));
     if (t.excluded) description.append(el("div", { className: "small", text: "Confirmed duplicate — no voucher." }));

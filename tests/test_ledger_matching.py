@@ -6,7 +6,9 @@ from datetime import date
 
 from tally_automation.db.models import TallyGroup, TallyLedger
 from tally_automation.vouchers.compat import Masters
-from tally_automation.vouchers.matching import category, counter_ledgers, name_tokens, party_in_narration, statement_bank
+from tally_automation.vouchers.matching import (
+    category, counter_ledgers, name_tokens, new_party_name, party_in_narration, party_segments, statement_bank,
+)
 
 
 def _ledger(name: str, parent: str, **kw) -> TallyLedger:
@@ -42,6 +44,8 @@ LEDGERS = [
     _ledger("Omega Power Corporation", "Sundry Creditors"),
     _ledger("Housing Loan Interest", "Indirect Expenses"),
     _ledger("Synthetic Housing Loan", "Loans (Liability)"),
+    _ledger("Korvandell Synthetic", "Sundry Creditors"),
+    _ledger("Staff Salary", "Indirect Expenses"),
 ]
 
 
@@ -145,3 +149,19 @@ def test_transfer_to_a_loan_account_is_the_housing_loan() -> None:
         assert names(found)[:2] == ["Synthetic Housing Loan", "Housing Loan Interest"], names(found)
     # An ordinary transfer with only digits is not a loan-account transfer.
     assert category("NEFT_OUT:SYNB1/SYNTHETIC PAYEE KUMAR/123456789012") is None
+
+
+def test_a_close_spelling_of_the_payee_finds_the_ledger() -> None:
+    m = masters()
+    bank = {"l-Synthetic Main Bank"}
+    narration = "NEFT_OUT:SYNB00000000001/KORVNDELL SYNTHETIC /SYNB0001234/1234567890"
+    assert party_segments(narration) == ["KORVNDELL SYNTHETIC"]
+    found = counter_ledgers(m, narration, True, bank)
+    assert names(found)[0] == "Korvandell Synthetic" and found[0].reason.startswith("Similar spelling")
+    # A name nothing like any ledger gets no existing ledger, but its payee name for a new one.
+    other = "NEFT_OUT:SYNB00000000002/QUENTIN ZYLOPHONE /SYNB0001234/1234567890"
+    assert counter_ledgers(m, other, True, bank) == []
+    assert new_party_name(other) == "QUENTIN ZYLOPHONE"
+    # Not a transfer narration: no party name is guessed from it.
+    assert new_party_name("CASH HAND CHARGE3 - 04-11-2026") is None
+    assert category("SALARY") == "salary" and names(counter_ledgers(m, "SALARY", True, bank))[0] == "Staff Salary"
