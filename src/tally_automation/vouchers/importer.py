@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
@@ -68,6 +68,7 @@ class Snapshot:
     voucher_date: date
     voucher_type: str
     entries: Counter
+    new_ledgers: list[dict] = field(default_factory=list)     # [{name, parent}] to create before the voucher
 
 
 @dataclass
@@ -132,7 +133,8 @@ def _claim(factory: sessionmaker[Session], voucher_id: int, write_enabled: bool,
         tx.flush()
         assert voucher.voucher_date is not None and voucher.voucher_type_name is not None
         return Snapshot(voucher_id, attempt.id, voucher.company_name, voucher.marker, voucher.xml,
-                        voucher.voucher_date, voucher.voucher_type_name, _expected(voucher.entries))
+                        voucher.voucher_date, voucher.voucher_type_name, _expected(voucher.entries),
+                        list((voucher.mapping or {}).get("new_ledgers") or []))
 
 
 def _verify(found: TallyVoucher, snap: Snapshot) -> tuple[bool, str]:
@@ -251,6 +253,49 @@ def _record(factory: sessionmaker[Session], snap: Snapshot, outcome: Outcome) ->
     })
 
 
+def _noted(outcome: Outcome, note: str | None) -> Outcome:
+    if note:
+        outcome.message = f"{note} {outcome.message}"
+    return outcome
+
+
+def _create_ledgers(client: TallyClient, company: str, snap: Snapshot,
+                    known: dict[str, set[str] | None]) -> tuple[Outcome | None, str]:
+    """Create the voucher's new ledgers that TallyPrime does not have yet (asking for its ledger names once).
+    Returns (an Outcome if the voucher must not be sent, notes on what was created)."""
+    notes = []
+    for item in snap.new_ledgers:
+        name, parent = item["name"], item["parent"]
+        key = " ".join(name.lower().split())
+        if known["names"] is None:
+            try:
+                known["names"] = client.ledger_names(company)
+            except (TallyConnectionError, TallyResponseError) as exc:
+                return Outcome(AttemptStatus.NOT_SENT, f"Not sent: could not check TallyPrime for the new ledger "
+                                                       f"“{name}” ({exc})."), ""
+        names = known["names"]
+        assert names is not None
+        if key in names:
+            continue      # created earlier (by this batch, a retry, or by hand): never created twice
+        try:
+            result = client.create_ledger(company, name, parent)
+        except (TallyWriteBlocked, TallyNotSentError) as exc:
+            return Outcome(AttemptStatus.NOT_SENT, f"Not sent: the new ledger “{name}” was not created ({exc})."), ""
+        except (TallyConnectionError, TallyResponseError) as exc:
+            known["names"] = None      # it may or may not exist now: ask again before the next one
+            return Outcome(AttemptStatus.NOT_SENT,
+                           f"Not sent: TallyPrime's answer to creating the new ledger “{name}” was missing or unclear "
+                           f"({exc}). Import again: the app first checks whether the ledger exists."), ""
+        if not result.succeeded:
+            return Outcome(AttemptStatus.NOT_SENT, f"Not sent: TallyPrime refused to create the new ledger “{name}”: "
+                           + ("; ".join(result.messages) or f"{result.errors} error(s)."),
+                           errors=result.errors, excerpt=result.excerpt), ""
+        names.add(key)
+        logger.info("new ledger created", extra={"voucher_id": snap.voucher_id})
+        notes.append(f"Created the new ledger “{name}” under “{parent}”.")
+    return None, " ".join(notes)
+
+
 @dataclass
 class _Planned:
     voucher_id: int
@@ -307,6 +352,8 @@ def _import_company(factory: sessionmaker[Session], client: TallyClient, company
 
     # 3. Send, one voucher at a time; each attempt is committed as "sending" first.
     pending: list[Snapshot] = []
+    notes: dict[int, str] = {}                       # attempt id → "Created the new ledger …"
+    known: dict[str, set[str] | None] = {"names": None}   # TallyPrime's ledger names, asked once if needed
     present: list[tuple[Snapshot, list[TallyVoucher]]] = []
     created: list[tuple[Snapshot, ImportResult]] = []
     try:
@@ -325,10 +372,18 @@ def _import_company(factory: sessionmaker[Session], client: TallyClient, company
             if existing:
                 present.append((snap, existing))
                 continue
+            if snap.new_ledgers:
+                problem, note = _create_ledgers(client, company_name, snap, known)
+                if problem is not None:
+                    pending.remove(snap)
+                    _record(factory, snap, problem)
+                    continue
+                if note:
+                    notes[snap.attempt_id] = note
             sent = _send(client, snap)
             if isinstance(sent, Outcome):
                 pending.remove(snap)
-                _record(factory, snap, sent)
+                _record(factory, snap, _noted(sent, notes.get(snap.attempt_id)))
             else:
                 created.append((snap, sent))
 
@@ -346,7 +401,8 @@ def _import_company(factory: sessionmaker[Session], client: TallyClient, company
                 _record(factory, snap, _present_outcome(snap, existing, detailed, read_error))
                 pending.remove(snap)
             for snap, result in created:
-                _record(factory, snap, _created_outcome(snap, result, detailed, read_error))
+                _record(factory, snap, _noted(_created_outcome(snap, result, detailed, read_error),
+                                              notes.get(snap.attempt_id)))
                 pending.remove(snap)
     except Exception as exc:  # noqa: BLE001 - recorded, never silently ignored
         logger.exception("voucher import crashed", extra={"voucher_ids": [s.voucher_id for s in pending]})

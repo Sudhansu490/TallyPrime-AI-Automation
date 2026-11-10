@@ -63,6 +63,54 @@ def assert_voucher_import(body: str) -> None:
         raise TallyWriteBlocked("The import contains an alter or delete action; not sent.")
 
 
+# ---- New ledger (the only master this application may create) ----------------------------------
+
+_LEDGER_CHILDREN = {"NAME.LIST", "PARENT", "ISBILLWISEON"}
+
+
+def ledger_create_request(company: str, name: str, parent: str) -> str:
+    """Create ONE new ledger with just a name and a group. Nothing else is set; existing ledgers are never
+    altered (TallyPrime refuses a create for a name that exists)."""
+    body = (
+        "<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA>"
+        "<REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>"
+        f"<STATICVARIABLES><SVCURRENTCOMPANY>{escape(company)}</SVCURRENTCOMPANY></STATICVARIABLES></REQUESTDESC>"
+        '<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">'
+        f'<LEDGER NAME="{escape(name, {chr(34): "&quot;"})}" ACTION="Create">'
+        f"<NAME.LIST><NAME>{escape(name)}</NAME></NAME.LIST><PARENT>{escape(parent)}</PARENT>"
+        "<ISBILLWISEON>No</ISBILLWISEON></LEDGER>"
+        "</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>"
+    )
+    assert_ledger_create(body)
+    return body
+
+
+def assert_ledger_create(body: str) -> None:
+    """Refuse anything but creating exactly one ledger with only a name, a group and bill-wise off."""
+    if body.count("<TALLYREQUEST>") != 1 or "<TALLYREQUEST>Import Data</TALLYREQUEST>" not in body:
+        raise TallyWriteBlocked("Only an 'Import Data' request may create a ledger.")
+    if re.search(r"<!(DOCTYPE|ENTITY)|<\s*TDL\b", body, re.IGNORECASE):
+        raise TallyWriteBlocked("The ledger import contains a DTD or TDL and was not sent.")
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as exc:
+        raise TallyWriteBlocked(f"The ledger import XML is not well-formed ({exc}); not sent.") from exc
+    if root.findtext("BODY/IMPORTDATA/REQUESTDESC/REPORTNAME") != "All Masters":
+        raise TallyWriteBlocked("The ledger import is not addressed to the All Masters report; not sent.")
+    messages = root.findall("BODY/IMPORTDATA/REQUESTDATA/TALLYMESSAGE")
+    children = [child for message in messages for child in message]
+    if len(messages) != 1 or len(children) != 1 or children[0].tag != "LEDGER":
+        raise TallyWriteBlocked("The ledger import must contain exactly one ledger and nothing else; not sent.")
+    ledger = children[0]
+    if ledger.get("ACTION") != "Create" or any(e.get("ACTION") not in (None, "Create") for e in root.iter()):
+        raise TallyWriteBlocked("Only creating a new ledger is allowed; not sent.")
+    if {child.tag for child in ledger} - _LEDGER_CHILDREN or len(root.findall(".//LEDGER")) != 1:
+        raise TallyWriteBlocked("The new ledger may only have a name, a group and bill-wise off; not sent.")
+    names = [n.text or "" for n in ledger.findall("NAME.LIST/NAME")]
+    if len(names) != 1 or names[0] != ledger.get("NAME") or not (ledger.findtext("PARENT") or "").strip():
+        raise TallyWriteBlocked("The new ledger needs exactly one name and a group; not sent.")
+
+
 # ---- Marker lookup (read) -----------------------------------------------------------------
 
 LOOKUP_FIELDS = ("Date", "VoucherTypeName", "Narration", "MasterID", "GUID", "Reference", "PartyLedgerName",

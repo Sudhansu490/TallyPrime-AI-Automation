@@ -21,8 +21,14 @@ function option(text, value) {
   return el("option", { text, attrs: { value } });
 }
 
-/** A select of suggested ledgers plus a search over all retrieved ledgers of the company. */
-function ledgerPicker(label, suggestions = [], onChange = null) {
+const NEW = "__new__";
+
+/**
+ * A select of suggested ledgers plus a search over all retrieved ledgers of the company.
+ * With ``newLedger`` ({groups, group}), a name typed in the search that is not a ledger yet fills the
+ * select as "New ledger: …" with a group to create it under; it is created in TallyPrime on import.
+ */
+function ledgerPicker(label, suggestions = [], onChange = null, newLedger = null) {
   const select = el("select", { attrs: { "aria-label": label, required: "" } });
   const search = el("input", {
     className: "picker-search",
@@ -35,6 +41,16 @@ function ledgerPicker(label, suggestions = [], onChange = null) {
   if (suggestions.length) select.append(suggested);
   select.append(results);
   results.hidden = true;
+  const fresh = el("optgroup", { attrs: { label: "Not in TallyPrime yet" } });
+  const freshOption = option("", NEW);
+  fresh.append(freshOption);
+  fresh.hidden = true;
+  if (newLedger) select.append(fresh);
+  const groupSelect = el("select", { attrs: { "aria-label": `Group for the new ledger: ${label}` } });
+  for (const g of newLedger?.groups ?? []) groupSelect.append(option(g, g));
+  if (newLedger?.group && (newLedger.groups ?? []).includes(newLedger.group)) groupSelect.value = newLedger.group;
+  const groupRow = el("label", { className: "small new-ledger-group" }, [el("span", { text: "Create it under group " }), groupSelect]);
+  groupRow.hidden = true;
   // Pre-fill the best suggestion; the reviewer checks it and submits it (or picks another).
   const best = suggestions[0];
   const prefilled = best
@@ -42,9 +58,16 @@ function ledgerPicker(label, suggestions = [], onChange = null) {
     : "";
   const note = el("div", { className: "small picker-note", text: prefilled });
   if (best) select.value = best.guid;
-  select.addEventListener("change", () => {
-    note.textContent = !select.value ? "" : select.value === best?.guid ? prefilled : "Chosen by you.";
-  });
+  const freshName = () => search.value.trim().replace(/\s+/g, " ");
+  const showNote = () => {
+    const isNew = select.value === NEW;
+    groupRow.hidden = !isNew;
+    note.textContent = isNew
+      ? `New ledger “${freshName()}”: it is created in TallyPrime under the group below when you approve & import. Check the name and group.`
+      : !select.value ? "" : select.value === best?.guid ? prefilled : "Chosen by you.";
+  };
+  select.addEventListener("change", showNote);
+  groupSelect.addEventListener("change", showNote);
 
   let timer = null;
   search.addEventListener("input", () => {
@@ -53,19 +76,40 @@ function ledgerPicker(label, suggestions = [], onChange = null) {
       const q = search.value.trim();
       clear(results);
       results.hidden = !q;
-      if (!q) return;
+      if (!q) {
+        fresh.hidden = true;
+        if (select.value === NEW) { select.value = ""; showNote(); }
+        return;
+      }
       try {
         const data = await api.get(`/tally/companies/${encodeURIComponent(state.companyGuid)}/ledgers?q=${encodeURIComponent(q)}&limit=25`);
         for (const l of data.items) results.append(option(`${l.name} (${l.parent ?? "Primary"})${l.gstin ? ` · ${l.gstin}` : ""}`, l.guid));
-        if (!data.items.length) results.append(el("option", { text: "No ledger matches", attrs: { value: "", disabled: "" } }));
-        else if (!select.value && data.items.length === 1) { select.value = data.items[0].guid; onChange?.(); }
+        const name = freshName().toLowerCase();
+        const exact = data.items.find((l) => l.name.trim().replace(/\s+/g, " ").toLowerCase() === name);
+        if (exact && (!select.value || select.value === NEW)) {
+          select.value = exact.guid; onChange?.();
+        } else if (newLedger && !exact) {
+          // Not a ledger yet: offer it as a new one, and fill it in when nothing else is chosen.
+          freshOption.textContent = `New ledger: “${freshName()}” (created in TallyPrime on import)`;
+          fresh.hidden = false;
+          if (!select.value || select.value === NEW) { select.value = NEW; onChange?.(); }
+        } else if (!data.items.length) {
+          results.append(el("option", { text: "No ledger matches", attrs: { value: "", disabled: "" } }));
+        } else if (!select.value && data.items.length === 1) { select.value = data.items[0].guid; onChange?.(); }
+        if (!data.items.length) results.hidden = true;
+        showNote();
       } catch (error) {
         results.append(el("option", { text: error.message, attrs: { value: "", disabled: "" } }));
       }
     }, 300);
   });
   if (onChange) select.addEventListener("change", onChange);
-  return { element: el("div", { className: "picker" }, [select, note, search]), value: () => select.value || null, select };
+  return {
+    element: el("div", { className: "picker" }, [select, note, groupRow, search]),
+    value: () => (select.value && select.value !== NEW ? select.value : null),
+    newLedger: () => (select.value === NEW && freshName() ? { name: freshName(), group: groupSelect.value } : null),
+    select,
+  };
 }
 
 function voucherTypeSelect(label, options = []) {
@@ -142,7 +186,8 @@ function renderStatement(setup) {
     const problems = t.checks.filter((c) => !c.passed && c.severity === "error");
     const usable = !t.excluded && !problems.length;
     const box = el("input", { attrs: { type: "checkbox", "aria-label": `Generate a voucher for transaction ${t.sequence}` } });
-    const picker = usable ? ledgerPicker(`Other ledger for transaction ${t.sequence}`, s.counter[String(t.id)] ?? [], () => { box.checked = true; }) : null;
+    const newLedger = { groups: s.ledger_groups ?? [], group: t.money_out === false ? "Sundry Debtors" : "Sundry Creditors" };
+    const picker = usable ? ledgerPicker(`Other ledger for transaction ${t.sequence}`, s.counter[String(t.id)] ?? [], () => { box.checked = true; }, newLedger) : null;
     box.disabled = !usable;
     box.checked = Boolean(usable && picker.value());
     const description = el("td", { className: "details" }, [el("span", { text: t.description ?? dash })]);
@@ -207,7 +252,9 @@ function statementPayload() {
   for (const row of state.rows) {
     if (!row.box.checked) continue;
     const ledger = row.picker.value();
-    if (!ledger) missing.push(`other ledger of transaction ${row.sequence}`);
+    const created = row.picker.newLedger();
+    if (created) transactions.push({ transaction_id: row.id, new_ledger: created });
+    else if (!ledger) missing.push(`other ledger of transaction ${row.sequence}`);
     else transactions.push({ transaction_id: row.id, ledger });
   }
   if (!transactions.length && !missing.length) missing.push("at least one ticked transaction");

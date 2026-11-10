@@ -362,6 +362,10 @@ def test_one_click_needs_generated_vouchers(local: TestClient, tally: FakeTally)
 
 def kind(request) -> str:
     body = request.content.decode("utf-8", "replace")
+    if "<REPORTNAME>All Masters</REPORTNAME>" in body:
+        return "create-ledger"
+    if "AppLedger" in body:
+        return "ledgers"
     if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in body:
         return "import"
     if "AppMarkedVouchers" in body:
@@ -397,3 +401,99 @@ def test_one_click_when_the_company_is_closed_sends_nothing(local: TestClient, t
     body = approve_import(local, document_id).json()
     assert body["failed"] == 2 and all("not open in TallyPrime" in i["message"] for i in body["items"])
     assert [kind(r) for r in tally.requests] == ["companies"] and tally.imports == 0
+
+
+# ---- New ledgers typed on the Generate page ---------------------------------------------------------
+
+def statement_with_new_ledger(client: TestClient, *, name: str = "Quill Traders", group: str = "Sundry Creditors",
+                              both: bool = False):
+    document_id = upload(client, text_pdf(STATEMENT_PAGE_1, STATEMENT_PAGE_2), "bank_statement")
+    process(client, FakeLlm(statement_page1_reply(), statement_page2_reply()), pages_per_call=1)
+    out, into = setup(client, document_id)["statement"]["transactions"]
+    second = ({"transaction_id": into["id"], "new_ledger": {"name": name.lower(), "group": group}} if both else
+              {"transaction_id": into["id"], "ledger": guid("Synthetic Cash")})
+    response = generate(client, document_id, statement={
+        "bank": guid("Synthetic Bank"),
+        "voucher_types": {"payment": "Payment", "receipt": "Receipt", "contra": "Contra"},
+        "transactions": [{"transaction_id": out["id"], "new_ledger": {"name": name, "group": group}}, second],
+    })
+    return document_id, response
+
+
+def test_a_new_ledger_is_created_in_tally_before_its_voucher(local: TestClient, tally: FakeTally) -> None:
+    document_id, response = statement_with_new_ledger(local)
+    assert response.status_code == 200, response.text
+    payment, contra = response.json()
+    assert payment["status"] == "ready" and payment["party_ledger_name"] in (None, "Quill Traders")
+    assert any(c["code"] == "new_ledger" and "Sundry Creditors" in c["message"] for c in payment["checks"])
+    assert tally.created_ledgers == []                                   # generating sends nothing
+    enable_writes(local)
+    tally.requests.clear()
+    body = approve_import(local, document_id).json()
+    assert (body["imported"], body["failed"]) == (2, 0), body
+    assert tally.created_ledgers == [("Quill Traders", "Sundry Creditors")]
+    assert [kind(r) for r in tally.requests] == [
+        "companies", "lookup", "ledgers", "create-ledger", "import", "import", "readback"]
+    attempt = local.get(f"/api/v1/vouchers/{payment['id']}/history").json()["imports"][-1]
+    assert attempt["message"].startswith("Created the new ledger “Quill Traders” under “Sundry Creditors”.")
+    assert attempt["verified"] is True
+
+    # After the next masters sync the new ledger is suggested by name for the same narration.
+    assert local.post("/api/v1/tally/sync", json={"company": COMPANY}).status_code == 200
+    out = setup(local, document_id)["statement"]["transactions"][0]
+    first = setup(local, document_id)["suggestions"]["counter"][str(out["id"])][0]
+    assert (first["name"], first["reason"]) == ("Quill Traders", "Chosen last time")
+
+
+def test_the_same_new_ledger_twice_is_created_once(local: TestClient, tally: FakeTally) -> None:
+    document_id, response = statement_with_new_ledger(local, both=True)
+    assert response.status_code == 200, response.text
+    enable_writes(local)
+    body = approve_import(local, document_id).json()
+    assert body["imported"] == 2 and tally.created_ledgers == [("Quill Traders", "Sundry Creditors")]
+
+
+def test_a_refused_new_ledger_sends_no_voucher_and_can_be_retried(local: TestClient, tally: FakeTally) -> None:
+    document_id, _ = statement_with_new_ledger(local)
+    enable_writes(local)
+    tally.ledger_mode = "refuse"
+    first = approve_import(local, document_id).json()
+    failed = [i for i in first["items"] if i["outcome"] == "failed"]
+    assert len(failed) == 1 and "refused to create the new ledger" in failed[0]["message"]
+    assert len(tally.vouchers) == 1                                      # only the other voucher
+    tally.ledger_mode = "ok"
+    second = approve_import(local, document_id).json()
+    assert [i["outcome"] for i in second["items"]] == ["imported"] and len(tally.vouchers) == 2
+
+
+def test_a_new_ledger_with_an_existing_name_uses_that_ledger(local: TestClient, tally: FakeTally) -> None:
+    document_id, response = statement_with_new_ledger(local, name="synthetic supplier pvt ltd")
+    assert response.status_code == 200, response.text
+    payment = response.json()[0]
+    assert not any(c["code"] == "new_ledger" for c in payment["checks"])
+    assert [e["ledger"] for e in payment["entries"] if e["role"] == "counter"] == ["Synthetic Supplier Pvt Ltd"]
+
+
+@pytest.mark.parametrize("name, group", [("Synthetic Vendor", "Bank Accounts"), ("Synthetic Vendor", "No Such Group"),
+                                         ("Bad <name>", "Sundry Creditors")])
+def test_new_ledgers_are_refused_under_bank_cash_or_tax_groups(local: TestClient, tally: FakeTally,
+                                                              name: str, group: str) -> None:
+    _, response = statement_with_new_ledger(local, name=name, group=group)
+    assert response.status_code == 422 and response.json()["code"] == "invalid_new_ledger", response.text
+
+
+def test_ledger_import_guard_allows_only_one_new_ledger() -> None:
+    from tally_automation.tally.importing import assert_ledger_create, ledger_create_request
+    good = ledger_create_request("SYNTHETIC CO", "Synthetic “Quoted” & Co", "Sundry Creditors")
+    assert_ledger_create(good)
+    for bad in (good.replace('ACTION="Create"', 'ACTION="Alter"'),
+                good.replace("<ISBILLWISEON>No</ISBILLWISEON>", "<OPENINGBALANCE>100</OPENINGBALANCE>"),
+                good.replace("</LEDGER>", '</LEDGER><LEDGER NAME="X" ACTION="Create"><PARENT>Y</PARENT></LEDGER>'),
+                good.replace("All Masters", "Vouchers")):
+        with pytest.raises(TallyWriteBlocked):
+            assert_ledger_create(bad)
+    with pytest.raises(TallyWriteBlocked):
+        assert_voucher_import(good)                         # a ledger never passes the voucher guard
+    client = TallyClient("127.0.0.1", 9000, timeout=1, export_timeout=1, max_bytes=1000, write_enabled=False)
+    with pytest.raises(TallyWriteBlocked):
+        client.create_ledger("SYNTHETIC CO", "Synthetic Vendor", "Sundry Creditors")

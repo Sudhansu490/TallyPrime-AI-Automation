@@ -115,6 +115,9 @@ class FakeTally:
         self.vouchers: list[dict] = []
         self.import_mode = "ok"
         self.imports = 0
+        # New ledgers created through a ledger import: (name, parent); "refuse" makes them fail.
+        self.created_ledgers: list[tuple[str, str]] = []
+        self.ledger_mode = "ok"
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -127,6 +130,8 @@ class FakeTally:
         if request.method == "GET":
             return httpx.Response(200, text=STATUS_TEXT, headers={"content-type": "text/xml; charset=utf-8"})
         body = request.content.decode()
+        if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in body and "<REPORTNAME>All Masters</REPORTNAME>" in body:
+            return self._create_ledger(body)
         if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in body:
             return self._import(request, body)
         collection = re.search(r'<COLLECTION NAME="App(\w+)"', body).group(1)
@@ -141,6 +146,9 @@ class FakeTally:
             text = EMPTY            # Tally's real behaviour: STATUS 1, no records
         else:
             text = {"Group": GROUPS, "Ledger": LEDGERS, "VoucherType": VOUCHER_TYPES}[collection]
+        if collection == "Ledger" and self.created_ledgers and "</COLLECTION>" in text:
+            created = "".join(_ledger(name, parent) for name, parent in self.created_ledgers)
+            text = text.replace("   </COLLECTION>", created + "   </COLLECTION>")
         return httpx.Response(200, content=text.encode(), headers={"content-type": "text/xml; charset=utf-8"})
 
     @property
@@ -165,6 +173,15 @@ class FakeTally:
         if self.import_mode == "timeout_after_create":
             raise httpx.ReadTimeout("synthetic: created, answer lost", request=request)
         return httpx.Response(200, text=IMPORT_CREATED.format(id=self.vouchers[-1]["master_id"]))
+
+    def _create_ledger(self, body: str) -> httpx.Response:
+        ledger = ET.fromstring(body).find(".//LEDGER")
+        name, parent = ledger.get("NAME"), ledger.findtext("PARENT")
+        if self.ledger_mode == "refuse":
+            return httpx.Response(200, text=IMPORT_REFUSED.replace("Ledger 'Synthetic Missing' does not exist!",
+                                                                    f"Group '{parent}' does not exist!"))
+        self.created_ledgers.append((name, parent))
+        return httpx.Response(200, text=IMPORT_CREATED.format(id=0))
 
     def _lookup(self, body: str) -> httpx.Response:
         needle = re.search(r'\$Narration Contains "([^"]+)"', body).group(1)

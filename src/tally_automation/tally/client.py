@@ -5,7 +5,10 @@ before it is sent. The one write is ``import_voucher`` (Phase 8): it exists
 only on a client created with ``write_enabled=True`` (``TALLY_WRITE_ENABLED``),
 and its body must pass ``assert_voucher_import`` (exactly one new voucher,
 nothing else) immediately before it is sent. Approval and duplicate checks
-happen before the client is ever asked (``vouchers.importer``).
+happen before the client is ever asked (``vouchers.importer``). The only other
+write is ``create_ledger``, for a ledger the reviewer typed as new: it must pass
+``assert_ledger_create`` (exactly one new ledger with a name, a group and
+bill-wise off; never an alteration).
 
 Network rules:
 
@@ -29,7 +32,8 @@ from tally_automation.config import Settings
 from tally_automation.network import TAILSCALE_IPV4, TAILSCALE_IPV6
 from tally_automation.tally import masters as m
 from tally_automation.tally.importing import (
-    ImportResult, TallyVoucher, assert_voucher_import, marker_lookup_request, parse_import_response,
+    ImportResult, TallyVoucher, assert_ledger_create, assert_voucher_import, ledger_create_request,
+    marker_lookup_request, parse_import_response,
     parse_marked_vouchers,
 )
 from tally_automation.tally.xmlio import (
@@ -117,14 +121,18 @@ class TallyClient:
     # ---- transport -------------------------------------------------------------------
 
     def _send(
-        self, method: str, body: str | None, timeout: float, *, write: bool = False,
+        self, method: str, body: str | None, timeout: float, *, write: bool | str = False,
     ) -> tuple[bytes, str | None, int]:
         if body is not None:
-            # Last line of defence, right before the network.
+            # Last line of defence, right before the network. ``write`` is True for a voucher import,
+            # "ledger" for creating one new ledger; nothing else can be written.
             if write:
                 if not self.write_enabled:
                     raise TallyWriteBlocked("Writing to TallyPrime is disabled (TALLY_WRITE_ENABLED=false).")
-                assert_voucher_import(body)
+                if write == "ledger":
+                    assert_ledger_create(body)
+                else:
+                    assert_voucher_import(body)
             else:
                 assert_read_only(body)
         started = time.perf_counter()
@@ -211,6 +219,23 @@ class TallyClient:
         body = marker_lookup_request(company, needle, from_date, to_date, entries=entries)
         content, content_type, _ = self._send("POST", body, self.export_timeout)
         return parse_marked_vouchers(decode(content, content_type))
+
+    def ledger_names(self, company: str) -> set[str]:
+        """Every ledger name in the company, lower-cased (read-only), to tell whether a new one exists."""
+        result = self.export("Ledger", ("Name",), company)
+        names = set()
+        for ledger in result.parsed.root.iter("LEDGER"):
+            name = ledger.get("NAME") or ledger.findtext("NAME") or ""
+            if name.strip():
+                names.add(" ".join(name.lower().split()))
+        return names
+
+    def create_ledger(self, company: str, name: str, parent: str) -> ImportResult:
+        """Create ONE new ledger (name and group only). Raises ``TallyNotSentError`` only when it certainly
+        was not sent."""
+        body = ledger_create_request(company, name, parent)
+        content, content_type, _ = self._send("POST", body, self.export_timeout, write="ledger")
+        return parse_import_response(decode(content, content_type))
 
     def import_voucher(self, xml: str) -> ImportResult:
         """Send one approved voucher. Raises ``TallyNotSentError`` only when it certainly was not sent."""

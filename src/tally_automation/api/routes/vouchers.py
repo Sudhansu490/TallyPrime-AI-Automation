@@ -19,7 +19,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -40,7 +40,7 @@ from tally_automation.vouchers import approval
 from tally_automation.vouchers.document_import import approve_and_import_document
 from tally_automation.vouchers.importer import import_voucher
 from tally_automation.vouchers.service import (
-    InvoiceChoice, StatementChoice, VoucherError, document_vouchers, generate_invoice, generate_statement,
+    InvoiceChoice, NewLedger, StatementChoice, VoucherError, document_vouchers, generate_invoice, generate_statement,
     prepare, stale_reasons,
 )
 
@@ -130,9 +130,22 @@ class InvoiceChoiceIn(BaseModel):
     round_off: LedgerGuid | None = None
 
 
+class NewLedgerIn(BaseModel):
+    """A ledger that is not in TallyPrime yet: created there (under ``group``) when the voucher is imported."""
+    name: str = Field(min_length=1, max_length=100)
+    group: TypeName
+
+
 class TransactionChoiceIn(BaseModel):
     transaction_id: int
-    ledger: LedgerGuid
+    ledger: LedgerGuid | None = None
+    new_ledger: NewLedgerIn | None = None
+
+    @model_validator(mode="after")
+    def one_ledger(self) -> "TransactionChoiceIn":
+        if (self.ledger is None) == (self.new_ledger is None):
+            raise ValueError("Give either an existing ledger or a new ledger for each transaction.")
+        return self
 
 
 class StatementChoiceIn(BaseModel):
@@ -284,7 +297,7 @@ _user_names = user_names
 _ERROR_STATUS = {
     "not_found": 404, "no_extraction": 409, "not_eligible": 409, "no_masters": 409, "wrong_type": 409,
     "excluded_transaction": 409, "mapping_incomplete": 422, "unknown_ledger": 422, "unknown_transaction": 422,
-    "warnings_not_acknowledged": 422, "no_vouchers": 409, "write_disabled": 409, "not_configured": 409, "same_person": 403,
+    "warnings_not_acknowledged": 422, "invalid_new_ledger": 422, "no_vouchers": 409, "write_disabled": 409, "not_configured": 409, "same_person": 403,
 }
 
 
@@ -382,7 +395,9 @@ def generate_vouchers(document_id: int, body: GenerateIn, request: Request, sess
                 assert s is not None
                 vouchers = generate_statement(tx, document_id, body.company_guid, StatementChoice(
                     bank=s.bank, voucher_types=dict(s.voucher_types),
-                    transactions={t.transaction_id: t.ledger for t in s.transactions},
+                    transactions={t.transaction_id: t.ledger for t in s.transactions if t.ledger is not None},
+                    new_ledgers={t.transaction_id: NewLedger(t.new_ledger.name, t.new_ledger.group)
+                                 for t in s.transactions if t.new_ledger is not None},
                 ), client_address=client, user_id=user.id)
             ids = [v.id for v in vouchers]
     except VoucherError as exc:

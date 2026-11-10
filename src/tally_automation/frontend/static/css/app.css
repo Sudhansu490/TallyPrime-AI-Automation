@@ -413,6 +413,8 @@ dialog input[type="text"] { width: 100%; }
 .document-group { border-top: 1px solid var(--border); padding: 0.75rem 0; }
 .document-group:first-child { border-top: 0; padding-top: 0; }
 .document-group h2 { font-size: 1.05rem; margin: 0; }
+.new-ledger-group { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin: 0 0 0.3rem; }
+.new-ledger-group select { max-width: 16rem; }
 .picker-note { color: var(--warn-fg); margin: 0.15rem 0 0.25rem; max-width: 34rem; }
 .picker-search { font: inherit; font-size: 0.85rem; padding: 0.25rem 0.45rem; border: 1px solid var(--border); border-radius: var(--radius); max-width: 34rem; }
 .mapping-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem; }

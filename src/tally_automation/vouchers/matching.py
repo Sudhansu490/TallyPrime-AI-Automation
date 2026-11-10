@@ -46,6 +46,7 @@ CATEGORY_LABELS = {
     "tds": "TDS deducted by the bank",
     "cash": "cash withdrawal or deposit",
     "interest": "interest",
+    "housing_loan": "housing loan",
 }
 
 
@@ -72,11 +73,30 @@ def tds_on_cash_withdrawal(description: str | None) -> bool:
     return bool(_TDS_CASH_WITHDRAWAL.search((description or "").upper()))
 
 
+# "D16578842CR TO117310NC00000073": a transfer to a loan account (branch digits, a letter scheme code,
+# digits), which the user always books to the Housing Loan ledger.
+_HOUSING_LOAN_TRANSFER = re.compile(r"\bD\d{5,}\s*CR\b[\s/:_-]*TO\s*\d{3,}[A-Z]{1,4}\d{4,}\b")
+
+
+def housing_loan_transfer(description: str | None) -> bool:
+    return bool(_HOUSING_LOAN_TRANSFER.search((description or "").upper()))
+
+
+def fixed_category(description: str | None) -> str | None:
+    """Narrations the user has said are ALWAYS one kind of entry, whatever was chosen before."""
+    if tds_on_cash_withdrawal(description):
+        return "charges"
+    if housing_loan_transfer(description):
+        return "housing_loan"
+    return None
+
+
 def category(description: str | None) -> str | None:
     """What kind of entry a narration describes, from its wording alone."""
     text = (description or "").upper()
-    if tds_on_cash_withdrawal(text):
-        return "charges"
+    fixed = fixed_category(text)
+    if fixed is not None:
+        return fixed
     if re.search(r"\bTDS\b", text):
         return "tds"
     if re.search(r"CHRG|CHARGE|CHGS|\bCHG\b|COMMISSION|\bFEE\b|\bFEES\b|SMS ALERT|\bGST ON\b", text):
@@ -153,6 +173,12 @@ def _by_category(masters: Masters, kind: str) -> list[Candidate]:
         return _unique(in_hand + named_cash)
     if kind == "interest":
         return [Candidate(l, "Interest ledger") for l in ledgers if "interest" in l.name.lower()]
+    if kind == "housing_loan":
+        loans = [l for l in ledgers if "housing loan" in " ".join(words(l.name)) or "home loan" in " ".join(words(l.name))]
+        # The loan itself (under Loans (Liability)) first; an interest ledger last.
+        loans.sort(key=lambda l: (not masters.in_groups(l, {"Loans (Liability)"}), "interest" in words(l.name),
+                                  l.name.lower()))
+        return [Candidate(l, "Housing loan ledger") for l in loans]
     return []
 
 

@@ -18,6 +18,7 @@ GROUPS = [TallyGroup(company_guid="c", sync_run_id=1, guid=n, name=n, aliases=[]
     ("Bank Accounts", "Current Assets"), ("Cash-in-Hand", "Current Assets"),
     ("Current Liabilities", None), ("Current Assets", None), ("Indirect Expenses", None),
     ("Duties & Taxes", "Current Liabilities"), ("Loans & Advances (Asset)", "Current Assets"),
+    ("Loans (Liability)", None),
 ]]
 LEDGERS = [
     _ledger("Synthetic Main Bank", "Bank Accounts", bank_account_number="111122223333", ifsc="SYNB0000001"),
@@ -39,6 +40,8 @@ LEDGERS = [
     _ledger("Zeta Electric & Hardware Mart", "Sundry Creditors"),
     _ledger("Zeta Traders", "Sundry Creditors"),
     _ledger("Omega Power Corporation", "Sundry Creditors"),
+    _ledger("Housing Loan Interest", "Indirect Expenses"),
+    _ledger("Synthetic Housing Loan", "Loans (Liability)"),
 ]
 
 
@@ -130,3 +133,15 @@ def test_a_ledger_named_by_most_of_its_name_is_found() -> None:
     assert "Zeta Traders" not in names(out)                    # one shared word is not enough
     # Common words alone ("power", "corporation") never identify a party.
     assert "Omega Power Corporation" not in names(counter_ledgers(m, "NRTGS/SYNB5/XYZ AND QQ POWER CORPORATION", False, bank))
+
+
+def test_transfer_to_a_loan_account_is_the_housing_loan() -> None:
+    m = masters()
+    bank = {"l-Synthetic Main Bank"}
+    for narration in ("D10000001CR TO999999SY00000001", "D10000002 CR TO 999999SY00000002", "d10000003cr to999999sy00000003"):
+        assert category(narration) == "housing_loan", narration
+        found = counter_ledgers(m, narration, True, bank)
+        # The loan itself first (Loans (Liability)), the interest ledger after it.
+        assert names(found)[:2] == ["Synthetic Housing Loan", "Housing Loan Interest"], names(found)
+    # An ordinary transfer with only digits is not a loan-account transfer.
+    assert category("NEFT_OUT:SYNB1/SYNTHETIC PAYEE KUMAR/123456789012") is None

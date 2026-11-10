@@ -187,9 +187,15 @@ def _dedupe(items: list[Suggestion]) -> list[Suggestion]:
 
 def _memory_suggestion(session: Session, masters: Masters, purpose: MappingPurpose, key: str | None) -> list[Suggestion]:
     memory = _remembered(session, masters.company_guid, purpose, key)
-    if memory is None or memory.ledger_guid not in masters.ledgers:
+    if memory is None:
         return []
-    return [_suggest(masters.ledgers[memory.ledger_guid], "Chosen last time")]
+    ledger = masters.ledgers.get(memory.ledger_guid or "")
+    if ledger is None:
+        # A ledger created by an import since (remembered by its stand-in GUID), or re-created in
+        # TallyPrime: found again by its name.
+        wanted = " ".join((memory.name or "").lower().split())
+        ledger = next((l for l in masters.ledgers.values() if " ".join(l.name.lower().split()) == wanted), None)
+    return [_suggest(ledger, "Chosen last time")] if ledger is not None else []
 
 
 def _voucher_type_options(session: Session, masters: Masters, kind: VoucherKind) -> list[Suggestion]:
@@ -272,12 +278,15 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
     for p in plans:
         key = description_key(p.description)
         options: list[Suggestion] = []
-        if matching.tds_on_cash_withdrawal(p.description):
-            # "TDS CASH WD" is always a bank charge: the bank-charges ledger comes first, before anything
-            # remembered for this narration (earlier vouchers may have used a TDS ledger).
+        fixed = matching.fixed_category(p.description)
+        if fixed is not None:
+            # Narrations the user has fixed to one kind ("TDS CASH WD" is always bank charges, a loan-account
+            # transfer always the housing loan): that kind's ledger comes first, before anything remembered
+            # for this narration (earlier vouchers may have used another ledger).
+            label = matching.CATEGORY_LABELS[fixed]
             options += [
-                Suggestion(s.guid, s.name, "Chosen last time for bank charges", s.parent, s.gstin)
-                for s in _memory_suggestion(session, masters, MappingPurpose.COUNTER, category_key("charges"))
+                Suggestion(s.guid, s.name, f"Chosen last time for {label}", s.parent, s.gstin)
+                for s in _memory_suggestion(session, masters, MappingPurpose.COUNTER, category_key(fixed))
             ]
             options += [_suggest(c.ledger, c.reason)
                         for c in matching.counter_ledgers(masters, p.description, p.money_out, bank_guids)]
@@ -300,6 +309,7 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
     return {
         "bank": [s.to_json() for s in bank],
         "counter": counter,
+        "ledger_groups": creatable_groups(masters),
         "voucher_types": {kind.value: [s.to_json() for s in _voucher_type_options(session, masters, kind)]
                           for kind in (VoucherKind.PAYMENT, VoucherKind.RECEIPT, VoucherKind.CONTRA)},
     }
@@ -378,6 +388,73 @@ class StatementChoice:
     bank: str
     voucher_types: dict[str, str]              # payment / receipt / contra → voucher type name
     transactions: dict[int, str]               # transaction id → other ledger's GUID
+    # transaction id → a ledger that is not in TallyPrime yet: created there when the voucher is imported
+    new_ledgers: dict[int, NewLedger] = field(default_factory=dict)
+
+
+@dataclass
+class NewLedger:
+    name: str
+    group: str
+
+
+NEW_LEDGER_PREFIX = "new:"
+NEW_LEDGER_MAX_NAME = 100
+# A new ledger may not be a bank, cash or tax ledger: those need details (account numbers, tax heads)
+# that are set up in TallyPrime itself.
+_NO_NEW_LEDGERS_UNDER = {"Bank Accounts", "Bank OD A/c", "Bank OCC A/c", "Cash-in-Hand", "Duties & Taxes"}
+
+
+def new_ledger_guid(name: str) -> str:
+    """A stand-in GUID for a ledger that does not exist yet (stable for the same name)."""
+    return NEW_LEDGER_PREFIX + hashlib.sha256(" ".join(name.lower().split()).encode()).hexdigest()[:24]
+
+
+def creatable_groups(masters: Masters) -> list[str]:
+    """Groups a new ledger may be created under."""
+    out = []
+    for name in sorted(masters.groups, key=str.lower):
+        stand_in = TallyLedger(name="", parent=name)
+        if not masters.in_groups(stand_in, _NO_NEW_LEDGERS_UNDER):
+            out.append(name)
+    return out
+
+
+def _with_new_ledgers(masters: Masters, choice: StatementChoice) -> tuple[Masters, dict[str, dict[str, str]]]:
+    """Masters with stand-ins for the new ledgers, and {stand-in guid: {name, parent}}. A name that already
+    exists in TallyPrime (any case) uses that ledger instead; nothing is created twice."""
+    if not choice.new_ledgers:
+        return masters, {}
+    existing = {" ".join(l.name.lower().split()): l for l in masters.ledgers.values()}
+    allowed = set(creatable_groups(masters))
+    extra: dict[str, TallyLedger] = {}
+    info: dict[str, dict[str, str]] = {}
+    for txn_id, new in choice.new_ledgers.items():
+        name = " ".join(new.name.split())
+        if not name or len(name) > NEW_LEDGER_MAX_NAME or re.search(r"[\x00-\x1f\x7f<>]", name):
+            raise VoucherError("invalid_new_ledger", f"“{name[:40]}” cannot be used as a ledger name "
+                                                     f"(1–{NEW_LEDGER_MAX_NAME} characters, no < or >).")
+        same = existing.get(name.lower())
+        if same is not None:
+            choice.transactions[txn_id] = same.guid
+            continue
+        if new.group not in allowed:
+            raise VoucherError("invalid_new_ledger", f"A new ledger cannot be created under “{new.group}”. "
+                                                     "Choose another group, or create it in TallyPrime.")
+        guid = new_ledger_guid(name)
+        if guid in info:
+            # The same new ledger for another transaction: one ledger, spelled as first typed.
+            if info[guid]["parent"] != new.group:
+                raise VoucherError("invalid_new_ledger", f"The new ledger “{name}” is given two different groups.")
+            choice.transactions[txn_id] = guid
+            continue
+        extra[guid] = TallyLedger(company_guid=masters.company_guid, guid=guid, name=name, aliases=[],
+                                  parent=new.group, is_bill_wise=False)
+        info[guid] = {"name": name, "parent": new.group}
+        choice.transactions[txn_id] = guid
+    copy = Masters(masters.company_guid, masters.company_name, masters.company_state, masters.books_from,
+                   {**masters.ledgers, **extra}, masters.groups, masters.voucher_types)
+    return copy, info
 
 
 def _forget(session: Session, company_guid: str, purpose: MappingPurpose, key: str | None) -> None:
@@ -530,11 +607,12 @@ def generate_statement(session: Session, document_id: int, company_guid: str, ch
         raise VoucherError("wrong_type", "This document is not a bank statement.")
     e = eligibility(session, document_id)
     _require_eligible(e)
-    if not choice.transactions:
+    if not choice.transactions and not choice.new_ledgers:
         raise VoucherError("mapping_incomplete", "Choose the other ledger for at least one transaction.")
     company, masters = load_masters(session, company_guid)
     statement = source.statement
     by_id = {t.id: t for t in statement.transactions}
+    masters, new_ledgers = _with_new_ledgers(masters, choice)
     unknown = [i for i in choice.transactions if i not in by_id]
     if unknown:
         raise VoucherError("unknown_transaction", "A chosen transaction does not belong to this statement's current extraction.")
@@ -560,12 +638,20 @@ def generate_statement(session: Session, document_id: int, company_guid: str, ch
         if plan.buildable:
             draft = build_bank(plan, BankLedgers(bank, counter, voucher_type, kind), marker=mark, document_id=document_id)
             checks += bank_checks(masters, draft, statement.account_number)
+        created = new_ledgers.get(counter.guid)
+        if created is not None:
+            checks.append(check("new_ledger", Severity.WARNING, False,
+                                f"“{created['name']}” is a new ledger: it will be created in TallyPrime under "
+                                f"“{created['parent']}” when this voucher is imported."))
         xml, checks = _finish(draft, company.name, checks)
+        mapping: dict[str, Any] = {"bank": bank.guid, "counter": counter.guid, "voucher_type": voucher_type}
+        if created is not None:
+            mapping["new_ledgers"] = [created]
         vouchers.append(_store(
             session, source=source, source_kind=VoucherSource.BANK_TRANSACTION, source_id=transaction.id,
             source_digest=transaction_digest(statement, transaction), company=company, kind=kind,
             voucher_type=voucher_type, draft=draft, xml=xml, checks=checks,
-            mapping={"bank": bank.guid, "counter": counter.guid, "voucher_type": voucher_type},
+            mapping=mapping,
             marker_text=mark, client_address=client_address, user_id=user_id,
         ))
         key = description_key(plan.description)
