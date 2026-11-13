@@ -50,7 +50,7 @@ class Parsed:
 # ---- Numbers -------------------------------------------------------------------
 
 _CURRENCY = re.compile(r"^(₹|rs\.?|inr)\s*|\s*(₹|rs\.?|inr)$", re.IGNORECASE)
-_DR_CR = re.compile(r"\s*\b(dr|cr)\.?$", re.IGNORECASE)
+_DR_CR = re.compile(r"\s*(?<![A-Za-z])(dr|cr)\.?$", re.IGNORECASE)
 _PLAIN_NUMBER = re.compile(r"^\d+(\.\d+)?$")
 _GROUPED_NUMBER = re.compile(r"^\d{1,3}(,\d{2,3})+(\.\d+)?$")
 
@@ -237,11 +237,28 @@ def parse_ifsc(raw: str) -> Parsed:
 
 def parse_account_number(raw: str) -> Parsed:
     text = re.sub(r"[\s\-]", "", raw).upper()
-    if re.fullmatch(r"[X*]+\d{3,}", text):
+    # Masked by the bank: at the start ("XXXXXXXXXX0074") or in the middle ("261XXXXXXXXX176").
+    if (re.fullmatch(r"[X*]+\d{3,}", text) or (re.fullmatch(r"\d*[X*]+\d+", text)
+            and sum(c.isdigit() for c in text) >= 4 and 6 <= len(text) <= 24)):
         return Parsed(text, Status.WARNING, ["The statement shows this account number partly masked."])
     if not re.fullmatch(r"\d{6,20}", text):
         return Parsed(text or None, Status.INVALID, ["An account number is 6–20 digits."])
     return Parsed(text, Status.VALID)
+
+
+def account_matches(full: str | None, shown: str | None) -> bool:
+    """Whether a ledger's full account number fits the statement's (possibly masked) one: equal digits;
+    for a number masked at the start, the same last digits; masked in the middle, the same length and the
+    same visible digits in the same places."""
+    number = re.sub(r"\D", "", full or "")
+    text = re.sub(r"[\s\-]", "", shown or "").upper()
+    if not number or not text:
+        return False
+    if not re.search(r"[X*]", text):
+        return re.sub(r"\D", "", text) == number
+    if re.fullmatch(r"[X*]+\d+", text):
+        return number.endswith(text.lstrip("X*"))
+    return len(text) == len(number) and all(c in "X*" or c == d for c, d in zip(text, number))
 
 
 def mask_account_number(value: str | None) -> str | None:

@@ -35,7 +35,9 @@ from tally_automation.documents.storage import DocumentStorage
 from tally_automation.extraction.llm import LlmClient
 from tally_automation.extraction.records import save_extraction
 from tally_automation.extraction.service import ExtractionError, PageInput, extract_document
-from tally_automation.extraction.table_amounts import correct_amount_columns, fill_skipped_amounts
+from tally_automation.extraction.table_amounts import (
+    correct_amount_columns, correct_from_layout, fill_skipped_amounts, rows_from_layout,
+)
 from tally_automation.processing.ocr import OcrEngine
 from tally_automation.processing.pipeline import OcrOptions, PageResult, StageError, extract_text
 from tally_automation.validation.service import validate_document
@@ -208,6 +210,18 @@ class ProcessingWorker:
         else:
             if moved:
                 logger.info("amount columns corrected from the statement table", extra={"job_id": job_id, "rows": moved})
+        try:
+            # Statements laid out in text columns: every transaction read from its printed columns, used only
+            # when the running balance confirms all of them; otherwise the model's rows are corrected column
+            # by column where its own dated line shows the amount.
+            proven = rows_from_layout(result, inputs, low_confidence=self.settings.llm_low_confidence)
+            laid_out = 0 if proven else correct_from_layout(result, inputs, low_confidence=self.settings.llm_low_confidence)
+        except Exception:  # a helper for the reviewer must never discard the extraction
+            logger.exception("reading amounts from the statement's columns failed", extra={"job_id": job_id})
+        else:
+            if proven or laid_out:
+                logger.info("amounts read from the statement's columns",
+                            extra={"job_id": job_id, "rows_proven": proven, "rows_corrected": laid_out})
         validation = None
         with transaction(self.session_factory) as session:
             job = session.get(ProcessingJob, job_id)

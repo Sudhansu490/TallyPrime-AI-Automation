@@ -21,6 +21,7 @@ GROUPS = [TallyGroup(company_guid="c", sync_run_id=1, guid=n, name=n, aliases=[]
     ("Current Liabilities", None), ("Current Assets", None), ("Indirect Expenses", None),
     ("Duties & Taxes", "Current Liabilities"), ("Loans & Advances (Asset)", "Current Assets"),
     ("Loans (Liability)", None),
+    ("Suspense A/c", None),
 ]]
 LEDGERS = [
     _ledger("Synthetic Main Bank", "Bank Accounts", bank_account_number="111122223333", ifsc="SYNB0000001"),
@@ -165,3 +166,26 @@ def test_a_close_spelling_of_the_payee_finds_the_ledger() -> None:
     # Not a transfer narration: no party name is guessed from it.
     assert new_party_name("CASH HAND CHARGE3 - 04-11-2026") is None
     assert category("SALARY") == "salary" and names(counter_ledgers(m, "SALARY", True, bank))[0] == "Staff Salary"
+
+
+def test_account_masked_in_the_middle_finds_the_bank_ledger() -> None:
+    found = statement_bank(masters(), "1111XXXX3333", None)
+    # "Synthetic Old Bank" (999922223333) also ends in 3333, but its visible first digits differ.
+    assert names(found)[0] == "Synthetic Main Bank" and "visible digits" in found[0].reason
+
+
+def test_bank_of_baroda_style_narrations_give_the_payee_name() -> None:
+    assert new_party_name("NEFT-SYNB630000000001-QUILLSTONE") == "QUILLSTONE"
+    assert new_party_name("NEFT-IN4260000000001-GO GREEN SYNTHETIC") == "GO GREEN SYNTHETIC"
+    assert new_party_name("RTGS-SYNBR52026100000000001-P D") is None          # too short to be a name
+    assert new_party_name("RTGS-SYNBR52026100000000002-") is None             # no name at all
+    assert new_party_name("NEFT_OUT:SYNB123/SYN NAME /SYNB0001234/1234567890") == "SYN NAME"   # PNB style
+
+
+def test_a_description_with_no_party_gets_suspense() -> None:
+    from tally_automation.vouchers.service import NO_PARTY, _suspense
+    m = masters()
+    [proposed] = _suspense(m, {"Suspense A/c"})                  # no Suspense ledger yet: a new one
+    assert (proposed.guid, proposed.name, proposed.parent, proposed.reason) == (None, "Suspense", "Suspense A/c", NO_PARTY)
+    m.ledgers["l-Suspense"] = _ledger("Suspense", "Suspense A/c")
+    assert [(s.guid, s.name) for s in _suspense(m, {"Suspense A/c"})] == [("l-Suspense", "Suspense")]

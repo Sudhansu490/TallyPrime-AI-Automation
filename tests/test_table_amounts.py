@@ -112,3 +112,84 @@ def test_a_stray_second_amount_is_cleared_and_right_rows_are_left_alone() -> Non
     # A different amount than the table prints is never "corrected": the reviewer decides.
     result, pages = extract([row(ROW_DEBIT, credit="9,999.00")])
     assert correct_amount_columns(result, pages, low_confidence=0.8) == 0
+
+
+# A plain-text statement (no drawn table): columns kept as spaces, wrapped rows print the amount below.
+LAYOUT_HEADER = "TRAN DATE     NARRATION                     CHQ.NO.     WITHDRAWALS(DR)     DEPOSITS(CR)     BALANCE(INR)"
+LAYOUT_ROW_1 = "30/10/2026    NEFT-SYNB00000001-SYNTHETIC                                                       1,10,000.00Dr"
+LAYOUT_AMT_1 = "                                                               10,000.00"
+LAYOUT_ROW_2 = "30/10/2026    NEFT-SYNB00000002-SYNTHETIC                                                       1,00,000.00Dr"
+LAYOUT_AMT_2 = "                                                                                 2,500.00"
+LAYOUT_TEXT = "\n".join(["SYNTHETIC BANK", LAYOUT_HEADER, LAYOUT_ROW_1, LAYOUT_AMT_1, "  SYNTHETIC PARTY",
+                         LAYOUT_ROW_2, LAYOUT_AMT_2])
+
+
+def test_plain_text_statement_amount_printed_below_the_row_is_read_from_its_column() -> None:
+    result, pages = extract([row(LAYOUT_ROW_1, balance="1,10,000.00Dr"), row(LAYOUT_ROW_2, balance="1,00,000.00Dr")],
+                            text=LAYOUT_TEXT)
+    assert fill_skipped_amounts(result, pages, low_confidence=0.8) == 2
+    first, second = result.rows
+    assert (first.fields["debit"].value, first.fields["credit"].raw) == ("10000.00", None)
+    assert (second.fields["credit"].value, second.fields["debit"].raw) == ("2500.00", None)
+    assert first.fields["debit"].method == "table" and "line below the row" in first.fields["debit"].messages[-1]
+
+
+def test_plain_text_statement_is_left_alone_when_unclear() -> None:
+    # Two amounts below the row: which one belongs to it is not clear.
+    two = "\n".join(["SYNTHETIC BANK", LAYOUT_HEADER, LAYOUT_ROW_1, LAYOUT_AMT_1 + "      5.00"])
+    result, pages = extract([row(LAYOUT_ROW_1)], text=two)
+    assert fill_skipped_amounts(result, pages, low_confidence=0.8) == 0
+    # The next transaction starts before any lone amount: nothing to take.
+    nxt = "\n".join(["SYNTHETIC BANK", LAYOUT_HEADER, LAYOUT_ROW_1, LAYOUT_ROW_2, LAYOUT_AMT_2])
+    result, pages = extract([row(LAYOUT_ROW_1)], text=nxt)
+    assert fill_skipped_amounts(result, pages, low_confidence=0.8) == 0
+
+
+def test_plain_text_statement_amount_in_the_wrong_column_is_moved() -> None:
+    from tally_automation.extraction.table_amounts import correct_amount_columns
+    # The model quoted the wrapped lines too, and put the debit printed below the row in the credit column.
+    quoted = "\n".join([LAYOUT_ROW_1, LAYOUT_AMT_1.strip(), "SYNTHETIC PARTY"])
+    result, pages = extract([row(quoted, credit="10,000.00", balance="1,10,000.00Dr")], text=LAYOUT_TEXT)
+    assert correct_amount_columns(result, pages, low_confidence=0.8) == 1
+    fixed = result.rows[0]
+    assert (fixed.fields["debit"].value, fixed.fields["credit"].raw) == ("10000.00", None)
+
+
+# ---- Statements laid out in text columns (SYNTHETIC) ------------------------------------------------
+
+def _columns_line(date_: str, narration: str, debit: str = "", credit: str = "", balance: str = "") -> str:
+    """A dated line with the amounts right-aligned under their headings (debit to 60, credit to 80, balance to 100)."""
+    left = f"{date_}  {date_}  {narration}"
+    out = left.ljust(60 - len(debit)) + debit
+    out = out.ljust(80 - len(credit)) + credit
+    return out.ljust(100 - len(balance)) + balance
+
+
+COLUMNS_HEADER = "DATE        VALUE DATE  NARRATION".ljust(45) + "WITHDRAWAL (DR)".rjust(15) + "DEPOSIT (CR)".rjust(20) + "BALANCE".rjust(20)
+COLUMNS_ROWS = [
+    _columns_line("01/04/2026", "NEFT-SYNB000001-SYNTHETIC VENDOR", debit="1,000.00", balance="9,000.00Cr"),
+    _columns_line("01/04/2026", "Charges for SYNTHETIC payment", debit="5.00", balance="8,995.00Cr"),
+    _columns_line("02/04/2026", "NEFT-SYNB000002-SYNTHETIC CUSTOMER", credit="2,500.00", balance="11,495.00Cr"),
+]
+COLUMNS_TEXT = "\n".join(["SYNTHETIC BANK - STATEMENT OF ACCOUNT", COLUMNS_HEADER, *COLUMNS_ROWS])
+
+
+def test_rows_proven_by_the_running_balance_replace_the_models_and_add_skipped_ones() -> None:
+    from tally_automation.extraction.table_amounts import rows_from_layout
+    # The model skipped the charge and put the deposit in the debit column.
+    result, pages = extract([row(COLUMNS_ROWS[0], txn_date="01/04/2026", debit="1,000.00", balance="9,000.00Cr", description="SYNTHETIC VENDOR"),
+                             row(COLUMNS_ROWS[2], debit="2,500.00", balance="11,495.00Cr")], text=COLUMNS_TEXT)
+    assert rows_from_layout(result, pages, low_confidence=0.8) == 3
+    first, charge, deposit = result.rows
+    assert (charge.fields["debit"].value, charge.fields["credit"].raw) == ("5.00", None)
+    assert (deposit.fields["credit"].value, deposit.fields["debit"].raw, deposit.fields["balance"].value) == (
+        "2500.00", None, "11495.00")
+    assert first.fields["description"].value == "SYNTHETIC VENDOR"           # the model's narration is kept
+    assert "running balance confirms all 3" in result.document_check_issues[-1]
+
+
+def test_rows_are_not_replaced_when_the_running_balance_does_not_prove_them() -> None:
+    from tally_automation.extraction.table_amounts import rows_from_layout
+    broken = COLUMNS_TEXT.replace("11,495.00Cr", "99,999.00Cr")
+    result, pages = extract([row(COLUMNS_ROWS[0], debit="1,000.00")], text=broken)
+    assert rows_from_layout(result, pages, low_confidence=0.8) == 0 and len(result.rows) == 1

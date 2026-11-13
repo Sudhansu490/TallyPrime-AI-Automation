@@ -497,3 +497,45 @@ def test_ledger_import_guard_allows_only_one_new_ledger() -> None:
     client = TallyClient("127.0.0.1", 9000, timeout=1, export_timeout=1, max_bytes=1000, write_enabled=False)
     with pytest.raises(TallyWriteBlocked):
         client.create_ledger("SYNTHETIC CO", "Synthetic Vendor", "Sundry Creditors")
+
+
+# ---- Transactions already entered in TallyPrime --------------------------------------------------
+
+def entered(client: TestClient, document_id: int):
+    from tally_fakes import COMPANY_GUID
+    return client.get(f"/api/v1/documents/{document_id}/tally-entries",
+                      params={"company": COMPANY_GUID, "bank": guid("Synthetic Bank")})
+
+
+def test_a_transaction_entered_by_hand_in_tally_is_found(local: TestClient, tally: FakeTally) -> None:
+    document_id = upload(local, text_pdf(STATEMENT_PAGE_1, STATEMENT_PAGE_2), "bank_statement")
+    process(local, FakeLlm(statement_page1_reply(), statement_page2_reply()), pages_per_call=1)
+    out, into = setup(local, document_id)["statement"]["transactions"]
+    # Entered by hand: the 5,000.00 payment of 02-04-2026 (TallyPrime signs the bank's credit positive),
+    # plus a voucher of another amount that must not match anything.
+    tally.vouchers += [
+        {"date": "20260402", "type": "Payment", "narration": "typed by hand", "guid": "hand-1", "master_id": "77",
+         "number": "12", "entries": [("Synthetic Supplier Pvt Ltd", "-5000.00"), ("Synthetic Bank", "5000.00")]},
+        {"date": "20260405", "type": "Receipt", "narration": "other", "guid": "hand-2", "master_id": "78",
+         "entries": [("Synthetic Bank", "-999.00"), ("Synthetic Cash", "999.00")]},
+    ]
+    tally.requests.clear()
+    body = entered(local, document_id).json()
+    assert body["checked"] is True and len(body["entries"]) == 1, body
+    [hit] = body["entries"]
+    assert (hit["transaction_id"], hit["voucher_type"], hit["number"], hit["by_this_app"]) == (out["id"], "Payment", "12", False)
+    assert all("Import Data" not in r.content.decode() for r in tally.requests)          # read only
+    # The receipt is not in TallyPrime (a different amount): it stays free to generate.
+    assert into["id"] not in {e["transaction_id"] for e in body["entries"]}
+
+
+def test_each_tally_voucher_pairs_with_one_transaction_only(local: TestClient, tally: FakeTally) -> None:
+    document_id, vouchers = statement_vouchers(local)
+    enable_writes(local)
+    assert approve_import(local, document_id).json()["imported"] == 2
+    body = entered(local, document_id).json()
+    assert len(body["entries"]) == 2 and all(e["by_this_app"] for e in body["entries"])
+    # Without TallyPrime the page is told so, and nothing is marked.
+    local.app.state.settings.tally_host = None
+    off = entered(local, document_id).json()
+    assert (off["checked"], off["entries"]) == (False, [])

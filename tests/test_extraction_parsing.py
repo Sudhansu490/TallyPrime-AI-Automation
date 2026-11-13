@@ -81,3 +81,21 @@ def test_missing_values() -> None:
     for value_type in ValueType:
         assert parse_value(None, value_type).status is Status.MISSING
         assert parse_value("   ", value_type).status is Status.MISSING
+
+
+def test_dr_or_cr_written_straight_after_a_balance() -> None:
+    from tally_automation.extraction.parsing import ValueType, parse_value
+    assert parse_value("2,74,91,693.76Dr", ValueType.BALANCE).value == "-27491693.76"
+    assert parse_value("3,31,21,831.11Cr", ValueType.BALANCE).value == "33121831.11"
+    assert parse_value("1,000.00 Dr.", ValueType.BALANCE).value == "-1000.00"
+
+
+def test_account_numbers_masked_in_the_middle() -> None:
+    from tally_automation.extraction.parsing import Status, ValueType, account_matches, parse_value
+    for shown in ("261XXXXXXXXX176", "XXXXXXXXXX0074"):
+        assert parse_value(shown, ValueType.ACCOUNT_NUMBER).status is Status.WARNING
+    assert parse_value("12XX", ValueType.ACCOUNT_NUMBER).status is Status.INVALID
+    assert account_matches("261000000000176", "261XXXXXXXXX176")
+    assert not account_matches("261000000000177", "261XXXXXXXXX176")      # a visible digit differs
+    assert not account_matches("2610000000000176", "261XXXXXXXXX176")     # a different length
+    assert account_matches("1234567890074", "XXXXXXXXXX0074") and account_matches("123456", "123456")

@@ -140,6 +140,24 @@ def marker_lookup_request(company: str, needle: str, from_date: date, to_date: d
     return body
 
 
+def period_vouchers_request(company: str, from_date: date, to_date: date) -> str:
+    """Export every voucher of the period with its ledger entries (read only), to find bank transactions
+    that are already entered in TallyPrime, by hand or by this application."""
+    methods = "".join(f"<NATIVEMETHOD>{f}</NATIVEMETHOD>" for f in LOOKUP_FIELDS + ("VoucherNumber",))
+    methods += "<NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>"
+    body = (
+        "<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE>"
+        "<ID>AppPeriodVouchers</ID></HEADER><BODY><DESC><STATICVARIABLES>"
+        "<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>"
+        f"<SVCURRENTCOMPANY>{escape(company)}</SVCURRENTCOMPANY>"
+        f'<SVFROMDATE TYPE="Date">{from_date:%Y%m%d}</SVFROMDATE><SVTODATE TYPE="Date">{to_date:%Y%m%d}</SVTODATE>'
+        '</STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="AppPeriodVouchers" ISINITIALIZE="Yes">'
+        f"<TYPE>Voucher</TYPE>{methods}</COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"
+    )
+    assert_read_only(body)
+    return body
+
+
 @dataclass
 class TallyEntry:
     ledger: str
@@ -156,6 +174,7 @@ class TallyVoucher:
     markers: list[str]
     deleted: bool
     entries: list[TallyEntry] = field(default_factory=list)
+    number: str | None = None
 
 
 def _date(value: str | None) -> date | None:
@@ -184,7 +203,7 @@ def parse_marked_vouchers(xml: str) -> list[TallyVoucher]:
             voucher_type=text(v, "VOUCHERTYPENAME"), narration=narration,
             markers=MARKER_IN_TEXT.findall(narration or ""),
             deleted=(text(v, "ISDELETED") or "No").lower() == "yes" or (text(v, "ISCANCELLED") or "No").lower() == "yes",
-            entries=entries,
+            entries=entries, number=text(v, "VOUCHERNUMBER"),
         ))
     return out
 

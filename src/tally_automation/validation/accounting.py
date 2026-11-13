@@ -136,8 +136,8 @@ _LABELS = {spec.name: spec.label for spec in (
 )}
 
 
-# Transaction fields that never decide an amount, a date or a ledger of a voucher.
-INFORMATIONAL_FIELDS = {"value_date", "cheque_number"}
+# Fields that never decide an amount, a date or a ledger of a voucher.
+INFORMATIONAL_FIELDS = {"value_date", "cheque_number", "bank_name", "account_holder"}
 
 
 def extraction_checks(

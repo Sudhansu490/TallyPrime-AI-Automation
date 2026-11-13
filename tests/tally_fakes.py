@@ -135,7 +135,7 @@ class FakeTally:
         if "<TALLYREQUEST>Import Data</TALLYREQUEST>" in body:
             return self._import(request, body)
         collection = re.search(r'<COLLECTION NAME="App(\w+)"', body).group(1)
-        if collection == "MarkedVouchers":
+        if collection in ("MarkedVouchers", "PeriodVouchers"):
             return self._lookup(body)
         company = re.search(r"<SVCURRENTCOMPANY>(.*?)</SVCURRENTCOMPANY>", body)
         if collection in self.overrides:
@@ -184,10 +184,12 @@ class FakeTally:
         return httpx.Response(200, text=IMPORT_CREATED.format(id=0))
 
     def _lookup(self, body: str) -> httpx.Response:
-        needle = re.search(r'\$Narration Contains "([^"]+)"', body).group(1)
+        found = re.search(r'\$Narration Contains "([^"]+)"', body)
+        needle = found.group(1) if found else ""          # the period export has no narration filter
         start = re.search(r"<SVFROMDATE[^>]*>(\d{8})<", body).group(1)
         end = re.search(r"<SVTODATE[^>]*>(\d{8})<", body).group(1)
         entries = "AllLedgerEntries" in body
+        number = "VoucherNumber" in body
         items = []
         for v in self.vouchers:
             if needle in (v["narration"] or "") and start <= v["date"] <= end:
@@ -198,8 +200,9 @@ class FakeTally:
                 items.append(
                     f'<VOUCHER REMOTEID="{v["guid"]}" VCHTYPE="{escape(v["type"])}"><DATE>{v["date"]}</DATE>'
                     f'<GUID>{v["guid"]}</GUID><MASTERID> {v["master_id"]}</MASTERID>'
-                    f'<VOUCHERTYPENAME>{escape(v["type"])}</VOUCHERTYPENAME><NARRATION>{escape(v["narration"])}</NARRATION>'
-                    f"<ISDELETED>No</ISDELETED>{lines}</VOUCHER>\n")
+                    f'<VOUCHERTYPENAME>{escape(v["type"])}</VOUCHERTYPENAME><NARRATION>{escape(v["narration"] or "")}</NARRATION>'
+                    + (f'<VOUCHERNUMBER>{v.get("number") or ""}</VOUCHERNUMBER>' if number else "")
+                    + f"<ISDELETED>No</ISDELETED>{lines}</VOUCHER>\n")
         # With no match TallyPrime 6.2 still sends one empty VOUCHER element.
         return httpx.Response(200, text=_envelope("".join(items) or "<VOUCHER></VOUCHER>\n"),
                               headers={"content-type": "text/xml; charset=utf-8"})

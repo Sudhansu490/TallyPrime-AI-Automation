@@ -33,7 +33,7 @@ from tally_automation.network import TAILSCALE_IPV4, TAILSCALE_IPV6
 from tally_automation.tally import masters as m
 from tally_automation.tally.importing import (
     ImportResult, TallyVoucher, assert_ledger_create, assert_voucher_import, ledger_create_request,
-    marker_lookup_request, parse_import_response,
+    marker_lookup_request, parse_import_response, period_vouchers_request,
     parse_marked_vouchers,
 )
 from tally_automation.tally.xmlio import (
@@ -211,6 +211,12 @@ class TallyClient:
 
 
     # ---- vouchers (Phase 8) ---------------------------------------------------------------
+
+    def period_vouchers(self, company: str, from_date, to_date) -> list[TallyVoucher]:
+        """Every voucher of the period with its ledger entries (read-only)."""
+        body = period_vouchers_request(company, from_date, to_date)
+        content, content_type, _ = self._send("POST", body, self.export_timeout)
+        return parse_marked_vouchers(decode(content, content_type))
 
     def marked_vouchers(
         self, company: str, needle: str, from_date, to_date, *, entries: bool = False,

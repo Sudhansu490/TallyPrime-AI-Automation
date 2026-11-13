@@ -16,6 +16,7 @@ from datetime import date
 from decimal import Decimal
 
 from tally_automation.db.models import TallyGroup, TallyLedger, TallyVoucherType, VoucherKind
+from tally_automation.extraction.parsing import account_matches
 from tally_automation.validation.accounting import Check, Severity
 from tally_automation.vouchers.drafts import ZERO, Draft, InvoicePlan, check, money, rate_key
 
@@ -282,7 +283,7 @@ def bank_checks(masters: Masters, draft: Draft, statement_account: str | None) -
             checks.append(check("bank_ledger_kind", Severity.ERROR, False,
                                 f"“{bank.name}” is not under Bank Accounts (or another bank group)."))
         if bank.bank_account_number and statement_account:
-            same = re.sub(r"\D", "", bank.bank_account_number) == re.sub(r"\D", "", statement_account)
+            same = account_matches(bank.bank_account_number, statement_account)
             checks.append(check(
                 "bank_account_matches", Severity.ERROR, same,
                 "The bank ledger's account number matches the statement." if same else

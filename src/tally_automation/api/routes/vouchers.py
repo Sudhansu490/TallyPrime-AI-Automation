@@ -35,10 +35,12 @@ from tally_automation.db.models import (
 from tally_automation.db.session import transaction
 from tally_automation.extraction.masking import mask_in, statement_secrets
 from tally_automation.extraction.parsing import mask_account_number
-from tally_automation.tally.client import TallyConfigError, create_tally_client
+from tally_automation.tally.client import TallyConfigError, TallyConnectionError, create_tally_client
+from tally_automation.tally.xmlio import TallyResponseError
 from tally_automation.vouchers import approval
 from tally_automation.vouchers.document_import import approve_and_import_document
 from tally_automation.vouchers.importer import import_voucher
+from tally_automation.vouchers.tally_entries import find_entered
 from tally_automation.vouchers.service import (
     InvoiceChoice, NewLedger, StatementChoice, VoucherError, document_vouchers, generate_invoice, generate_statement,
     prepare, stale_reasons,
@@ -359,7 +361,48 @@ def _setup_out(data: dict[str, Any], session: Session, document_id: int) -> Setu
     return SetupOut(**{**data, "statement": statement})
 
 
+class EnteredOut(BaseModel):
+    transaction_id: int
+    voucher_type: str | None
+    voucher_date: date | None
+    number: str | None
+    amount: Decimal
+    by_this_app: bool
+
+
+class TallyEntriesOut(BaseModel):
+    checked: bool                    # False: TallyPrime could not be asked (not running, company not open…)
+    message: str
+    entries: list[EnteredOut]
+
+
 # ---- Endpoints --------------------------------------------------------------------------------
+
+@router.get("/documents/{document_id}/tally-entries", response_model=TallyEntriesOut, responses={404: {}, 409: {}})
+def tally_entries(
+    document_id: int, request: Request, session: SessionDep, settings: SettingsDep, user: CurrentUserDep,
+    company: Annotated[str, Query(min_length=1, max_length=64)],
+    bank: Annotated[str, Query(min_length=1, max_length=64)],
+) -> TallyEntriesOut | JSONResponse:
+    """The statement's transactions TallyPrime already has a voucher for (read only), so they are not
+    entered twice."""
+    try:
+        tally = create_tally_client(settings, transport=getattr(request.app.state, "tally_transport", None))
+    except TallyConfigError as exc:
+        return TallyEntriesOut(checked=False, message=str(exc), entries=[])
+    try:
+        with tally:
+            found = find_entered(session, tally, document_id, company, bank)
+    except VoucherError as exc:
+        return _error(exc)
+    except (TallyConnectionError, TallyResponseError) as exc:
+        return TallyEntriesOut(checked=False, message=f"TallyPrime could not be checked for existing entries: {exc}",
+                               entries=[])
+    entries = [EnteredOut(**e.__dict__) for e in found]
+    message = (f"{len(entries)} transaction(s) are already entered in TallyPrime and are left unticked."
+               if entries else "None of these transactions is entered in TallyPrime yet.")
+    return TallyEntriesOut(checked=True, message=message, entries=entries)
+
 
 @router.get("/documents/{document_id}/voucher-setup", response_model=SetupOut, responses={404: {}, 409: {}})
 def voucher_setup(

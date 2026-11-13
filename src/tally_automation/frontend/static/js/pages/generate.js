@@ -190,7 +190,7 @@ function renderStatement(setup) {
   const body = $("transaction-rows");
   clear(body);
   if (!s) return;
-  state.pickers = { bank: ledgerPicker("Bank ledger", s.bank), types: {} };
+  state.pickers = { bank: ledgerPicker("Bank ledger", s.bank, () => checkEntered()), types: {} };
   head.append(el("label", {}, [el("span", { text: `Bank ledger for account ${st.account_number ?? "(not read)"}` }), state.pickers.bank.element]));
   for (const kind of ["payment", "receipt", "contra"]) {
     state.pickers.types[kind] = voucherTypeSelect(`${KIND_LABELS[kind]} voucher type`, s.voucher_types[kind]);
@@ -208,13 +208,16 @@ function renderStatement(setup) {
     if (t.reference) description.append(el("div", { className: "small muted", text: `Ref ${t.reference}` }));
     if (t.excluded) description.append(el("div", { className: "small", text: "Confirmed duplicate — no voucher." }));
     for (const p of problems) description.append(el("div", { className: "small error-text", text: p.message }));
+    const entered = el("div", { className: "small entered-note" });
+    entered.hidden = true;
+    description.append(entered);
     body.append(el("tr", {}, [
       el("td", {}, [box]), el("td", { text: String(t.sequence) }), el("td", { text: formatDate(t.date) }), description,
       el("td", { className: "num", text: t.money_out === true ? formatINR(t.amount) : "" }),
       el("td", { className: "num", text: t.money_out === false ? formatINR(t.amount) : "" }),
       el("td", {}, picker ? [picker.element] : [el("span", { className: "muted", text: dash })]),
     ]));
-    if (picker) state.rows.push({ id: t.id, sequence: t.sequence, box, picker });
+    if (picker) state.rows.push({ id: t.id, sequence: t.sequence, box, picker, entered });
   }
 }
 
@@ -236,7 +239,7 @@ function renderSetup(setup) {
   const isInvoice = setup.document_type === "purchase_invoice";
   $("invoice-mapping").hidden = !isInvoice;
   $("statement-mapping").hidden = isInvoice;
-  if (isInvoice) renderInvoice(setup); else renderStatement(setup);
+  if (isInvoice) renderInvoice(setup); else { renderStatement(setup); checkEntered(); }
   $("mapping-form").hidden = !c || !setup.eligibility.eligible;
   $("setup-card").hidden = false;
 }
@@ -330,7 +333,41 @@ async function loadVouchers({ keepMessage = false } = {}) {
   }
 }
 
+// ---- Transactions already entered in TallyPrime ---------------------------------------------------
+
+let enteredCheck = 0;
+
+/** Ask TallyPrime (read-only) which transactions it already has a voucher for, and untick those rows. */
+async function checkEntered() {
+  const bank = state.pickers.bank?.value();
+  const status = $("entered-status");
+  for (const row of state.rows) row.entered.hidden = true;
+  if (!bank || !state.companyGuid || !state.rows.length) { clear(status); return; }
+  const mine = ++enteredCheck;
+  showMessage(status, "loading", "Checking TallyPrime for transactions that are already entered…");
+  try {
+    const result = await api.get(`/documents/${state.documentId}/tally-entries?company=${encodeURIComponent(state.companyGuid)}` +
+      `&bank=${encodeURIComponent(bank)}`, { timeoutMs: 120000 });
+    if (mine !== enteredCheck) return;          // a newer check (another bank ledger) is under way
+    const byId = new Map(result.entries.map((e) => [e.transaction_id, e]));
+    for (const row of state.rows) {
+      const e = byId.get(row.id);
+      if (!e) continue;
+      row.box.checked = false;
+      row.entered.hidden = false;
+      row.entered.textContent = `Already entered in TallyPrime: ${e.voucher_type ?? "voucher"}` +
+        `${e.number ? ` no. ${e.number}` : ""} of ${formatDate(e.voucher_date)} for ${formatINR(e.amount)}` +
+        `${e.by_this_app ? " (imported by this application)" : ""}. Not generated again; tick it only if this is a different entry.`;
+    }
+    showMessage(status, !result.checked ? "warning" : result.entries.length ? "warning" : "success", result.message);
+  } catch (error) {
+    if (mine === enteredCheck) showError(status, error);
+  }
+}
+
 // ---- Loading ----------------------------------------------------------------------------------------
+
+const RETRIEVE = "retrieve:";
 
 async function loadCompanies() {
   const select = $("company-select");
@@ -339,6 +376,45 @@ async function loadCompanies() {
   if (!companies.length) select.append(option("No masters retrieved", ""));
   for (const c of companies) select.append(option(c.name, c.guid));
   if (state.companyGuid) select.value = state.companyGuid;
+  addLoadedCompanies(select, companies);   // in the background: never slows the page down
+}
+
+/** Companies open in TallyPrime whose masters were never retrieved: listed so they can be retrieved here. */
+async function addLoadedCompanies(select, stored) {
+  let status;
+  try {
+    status = await api.get("/tally/status");
+  } catch {
+    return;     // TallyPrime not reachable: the retrieved companies are all that can be used anyway
+  }
+  const known = new Set(stored.map((c) => c.name.trim().toLowerCase()));
+  const missing = (status.loaded_companies ?? []).filter((c) => !known.has(c.name.trim().toLowerCase()));
+  if (!missing.length || !select.isConnected) return;
+  const group = el("optgroup", { attrs: { label: "Open in TallyPrime, masters not retrieved yet" } });
+  for (const c of missing) group.append(option(`${c.name} — retrieve its masters first`, `${RETRIEVE}${c.name}`));
+  select.append(group);
+}
+
+async function retrieveCompany(name) {
+  const select = $("company-select");
+  if (!window.confirm(`Retrieve the groups, ledgers and voucher types of “${name}” from TallyPrime now?\n\n` +
+      "This reads masters only (no balances or vouchers) and takes up to a few minutes for a large company.")) {
+    select.value = state.companyGuid ?? "";
+    return;
+  }
+  select.disabled = true;
+  showMessage($("page-message"), "loading", `Retrieving the masters of “${name}” from TallyPrime…`);
+  try {
+    const run = await api.post("/tally/sync", { company: name }, { timeoutMs: 300000 });
+    state.companyGuid = run.company_guid;
+    await loadSetup();
+    showMessage($("page-message"), "success", `Masters of “${name}” retrieved; the ledgers below are from this company.`);
+  } catch (error) {
+    showError($("page-message"), error);
+    select.value = state.companyGuid ?? "";
+  } finally {
+    select.disabled = false;
+  }
 }
 
 async function loadSetup() {
@@ -385,7 +461,12 @@ function selectDocument(id) {
 }
 
 $("document-select").addEventListener("change", (e) => selectDocument(e.target.value));
-$("company-select").addEventListener("change", (e) => { state.companyGuid = e.target.value || null; loadSetup(); });
+$("company-select").addEventListener("change", (e) => {
+  const value = e.target.value;
+  if (value.startsWith(RETRIEVE)) { retrieveCompany(value.slice(RETRIEVE.length)); return; }
+  state.companyGuid = value || null;
+  loadSetup();
+});
 $("reload").addEventListener("click", () => { loadDocuments(); loadSetup(); });
 $("picker").addEventListener("submit", (e) => e.preventDefault());
 $("mapping-form").addEventListener("submit", generate);

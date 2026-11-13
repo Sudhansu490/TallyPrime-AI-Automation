@@ -106,6 +106,36 @@ class ExtractionResult:
 
 # ---- Text matching -------------------------------------------------------------------
 
+MAX_WRAPPED_PIECES = 4
+MAX_WRAP_GAP = 250          # letters and digits between two parts of a wrapped text (other columns)
+MIN_PIECE = 4
+
+
+def _in_pieces(needle: str, haystack: str) -> bool:
+    """Whether ``needle`` appears in ``haystack`` as at most MAX_WRAPPED_PIECES consecutive parts, each
+    found after the previous one and no further than MAX_WRAP_GAP from it."""
+    if not needle:
+        return False
+
+    def rest_from(position: int, previous_end: int | None, pieces: int) -> bool:
+        if position == len(needle):
+            return True
+        if pieces == MAX_WRAPPED_PIECES:
+            return False
+        shortest = min(MIN_PIECE, len(needle) - position)
+        for size in range(len(needle) - position, shortest - 1, -1):
+            piece = needle[position:position + size]
+            # Every occurrence counts: the same words ("Charges for … Payment") can start several rows.
+            start = haystack.find(piece, previous_end or 0)
+            while start != -1 and (previous_end is None or start - previous_end <= MAX_WRAP_GAP):
+                if rest_from(position + size, start + size, pieces + 1):
+                    return True
+                start = haystack.find(piece, start + 1)
+        return False
+
+    return rest_from(0, None, 0)
+
+
 def _alnum(text: str) -> str:
     """Letters and digits only, lower-case: robust to line breaks and spacing,
     still exact about every character that carries meaning."""
@@ -120,6 +150,11 @@ class _DocumentText:
     def contains(self, text: str) -> bool:
         needle = _alnum(text)
         return bool(needle) and needle in self.all
+
+    def contains_wrapped(self, text: str) -> bool:
+        """Text that wraps onto the following line(s) of the page, with other columns (amount, balance)
+        printed between its parts: every part is there, in order, close together."""
+        return _in_pieces(_alnum(text), self.all)
 
     def low_ocr_overlap(self, page: int | None, quote: str | None) -> bool:
         if page is None or quote is None or page not in self.pages:
@@ -140,6 +175,15 @@ def _raise_status(result: FieldResult, status: Status) -> None:
 
 
 _STATEMENT_BALANCES = {"opening_balance", "closing_balance"}
+_BALANCE_LABEL = re.compile(r"balance|opening|closing|brought\s+forward|carried\s+forward|\bB/?F\b|\bC/?F\b", re.IGNORECASE)
+# A statement header value counts only when printed next to its label (pages without the header make the
+# model offer a narration's party name or reference number instead).
+_HEADER_LABELS = {
+    "account_holder": re.compile(r"name|holder|customer", re.IGNORECASE),
+    "account_number": re.compile(r"a/?c\b|account|acct", re.IGNORECASE),
+    "bank_name": re.compile(r"bank", re.IGNORECASE),
+    "ifsc": re.compile(r"ifsc", re.IGNORECASE),
+}
 _PLACEHOLDER = re.compile(r"^(?:[-–—_.*/\\]+|n/?a|nil|null|none)$", re.IGNORECASE)
 
 
@@ -160,10 +204,14 @@ def build_field(
     if raw is None:
         return result
 
+    wrapped = False
     if not document.contains(raw):
-        result.flags.append("value_not_in_document")
-        result.messages.append("This value does not appear in the document text; it may have been invented.")
-        _raise_status(result, Status.INVALID)
+        if spec.value_type is ValueType.TEXT and document.contains_wrapped(raw):
+            wrapped = True      # e.g. a narration continued on the next line, past the amount columns
+        else:
+            result.flags.append("value_not_in_document")
+            result.messages.append("This value does not appear in the document text; it may have been invented.")
+            _raise_status(result, Status.INVALID)
     if evidence is None:
         result.flags.append("no_evidence")
         _raise_status(result, Status.WARNING)
@@ -172,7 +220,8 @@ def build_field(
             result.flags.append("evidence_not_found")
             result.messages.append("The quoted evidence was not found in the document text.")
             _raise_status(result, Status.WARNING)
-        if _alnum(raw) not in _alnum(evidence):
+        if _alnum(raw) not in _alnum(evidence) and not (
+                wrapped and _alnum(raw)[:12] and _alnum(raw)[:12] in _alnum(evidence)):
             result.flags.append("value_not_in_evidence")
             label = "row" if evidence_is_row else "quoted evidence"
             result.messages.append(f"The value is not part of its {label}.")
@@ -196,6 +245,10 @@ class RequestTooLarge(ExtractionError):
 
 class OutputCutOff(ExtractionError):
     """The reply hit the answer allowance, so rows could be missing: send less text per request."""
+
+
+class ReplyRejected(OutputCutOff):
+    """The reply failed the answer format twice for this much text: send less text per request."""
 
 
 def _batches(pages: list[PageInput], size: int) -> list[list[PageInput]]:
@@ -266,7 +319,9 @@ def _call(
             )
             continue
         return reply
-    raise ExtractionError(f"The LLM reply did not match the required schema ({last_problem}).")
+    # Retried once already: a long, strict reply (a dense statement page holds ~50 rows) is what goes wrong,
+    # so the caller sends less text per request (one page, then halves) before giving up.
+    raise ReplyRejected(f"The LLM reply did not match the required schema ({last_problem}).")
 
 
 def _same_model(reported: str, requested: str) -> bool:
@@ -372,18 +427,25 @@ def extract_document(
             getattr(getattr(reply, schema_def.header_key), spec.name) for reply in replies
         ]
         present = [c for c in candidates if c.value is not None and c.value.strip()]
+        label = _HEADER_LABELS.get(spec.name)
+        labelled = [c for c in present if label and c.evidence and label.search(c.evidence)]
+        if labelled:
+            # Pages without the account header make the model offer a narration's party name or reference
+            # number instead: only values printed next to their label count.
+            present = labelled
         chosen = present[0] if present else candidates[0]
         result = build_field(
             spec, chosen.value, evidence=chosen.evidence, page=chosen.page,
             confidence=chosen.confidence if present else None,
             document=document, low_confidence=low_confidence,
         )
-        if (spec.name in _STATEMENT_BALANCES and result.raw is not None and chosen.evidence
-                and _looks_like_transaction(chosen.evidence) and "balance" not in chosen.evidence.lower()):
-            # The statement prints no such balance: the model took a transaction row's running balance.
+        if (spec.name in _STATEMENT_BALANCES and result.raw is not None
+                and not _BALANCE_LABEL.search(chosen.evidence or "")):
+            # Not printed next to an opening/closing balance label: the model took another number (a
+            # transaction's running balance, a limit). Not used, so the balances are checked from the rows.
             result = build_field(spec, None, evidence=None, page=None, confidence=None,
                                  document=document, low_confidence=low_confidence)
-            result.messages.append("Not printed on the statement (the AI offered a transaction's balance, "
+            result.messages.append("Not printed on the statement with its label (the AI offered another number, "
                                    "which was not used). Enter it if the statement shows it.")
         others = {
             c.value.strip() for c in present[1:]

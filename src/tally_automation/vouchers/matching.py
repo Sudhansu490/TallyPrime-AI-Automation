@@ -30,6 +30,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from tally_automation.db.models import TallyLedger
+from tally_automation.extraction.parsing import account_matches
 from tally_automation.vouchers.compat import Masters
 
 BANK_ACCOUNT_GROUPS = {"Bank Accounts", "Bank OD A/c", "Bank OCC A/c"}
@@ -131,18 +132,24 @@ def statement_bank(masters: Masters, account_number: str | None, ifsc: str | Non
     shown = digits(account_number)
     if len(shown) < 4:
         return []
+    masked = bool(re.search(r"[X*]", (account_number or "").upper()))
+    last = re.search(r"(\d+)$", re.sub(r"[\s\-]", "", account_number or ""))
+    last_digits = last.group(1)[-4:] if last and len(last.group(1)) >= 4 else ""
     wanted_ifsc = (ifsc or "").strip().upper()
     full: list[Candidate] = []
     tail: list[tuple[int, Candidate]] = []
     for ledger in bank_ledgers(masters):
         number = digits(ledger.bank_account_number)
         same_ifsc = bool(wanted_ifsc) and (ledger.ifsc or "").strip().upper() == wanted_ifsc
-        if number and number == shown:
+        if number and not masked and number == shown:
             full.append(Candidate(ledger, "Same account number as the statement"))
-        elif number and number.endswith(shown[-4:]):
+        elif number and masked and account_matches(number, account_number):
+            reason = "Account number matches the statement's visible digits" + (" and same IFSC" if same_ifsc else "")
+            tail.append((0 if same_ifsc else 1, Candidate(ledger, reason)))
+        elif number and last_digits and number.endswith(last_digits):
             reason = "Account number ends with the statement's last digits" + (" and same IFSC" if same_ifsc else "")
             tail.append((0 if same_ifsc else 1, Candidate(ledger, reason)))
-        elif shown[-4:] in digits(ledger.name):
+        elif last_digits and last_digits in digits(ledger.name):
             tail.append((2, Candidate(ledger, "Ledger name contains the statement's last account digits")))
     return _unique(full + [c for _, c in sorted(tail, key=lambda t: (t[0], t[1].ledger.name))])
 
@@ -301,7 +308,7 @@ def party_in_narration(masters: Masters, description: str | None, money_out: boo
     return None
 
 
-# ---- Payee names in transfer narrations ("NEFT_OUT:<ref>/<NAME>/<IFSC>/<account>") ----------------
+# ---- Payee names in transfer narrations ("NEFT_OUT:<ref>/<NAME>/<IFSC>/<account>", "NEFT-<ref>-<NAME>") ---
 
 SIMILAR = "Similar spelling of the party name in the narration"
 LOOKS_SIMILAR = "Name looks similar to the narration's party: check"
@@ -318,11 +325,17 @@ def party_segments(description: str | None) -> list[str]:
     text = description or ""
     if not _TRANSFER.match(text):
         return []
+    if "/" in text or ":" in text:
+        parts = re.split(r"[/:]", text)[1:]          # PNB style: "NEFT_OUT:<ref>/<NAME>/<IFSC>/<account>"
+    else:
+        # Bank of Baroda style: "NEFT-<ref>-<NAME>" or "RTGS-<ref>-<NAME>"; the name itself may hold a dash.
+        parts = re.split(r"-", text, maxsplit=2)[1:]
     out = []
-    for segment in re.split(r"[/:]", text)[1:]:
+    for segment in parts:
         segment = " ".join(segment.split()).strip(" -.")
         letters = re.sub(r"[^A-Za-z]", "", segment)
         if (len(letters) < 3 or _IFSC.match(segment) or sum(ch.isdigit() for ch in segment) > len(letters)
+                or re.fullmatch(r"[A-Za-z]*\d[A-Za-z0-9]*", segment)        # one word with digits: a reference
                 or all(_REFERENCE_WORD.match(w) for w in re.findall(r"[A-Za-z]+", segment))):
             continue
         out.append(segment)

@@ -43,7 +43,9 @@
     <div id="statement-mapping" hidden>
       <div class="mapping-grid" id="statement-head"></div>
       <p class="small muted">Tick the transactions to generate, and choose the other ledger for each. A transaction
-        with a bank or cash ledger becomes a Contra voucher. Unticked transactions are left for entry in TallyPrime.</p>
+        with a bank or cash ledger becomes a Contra voucher. Unticked transactions are left for entry in TallyPrime.
+        Transactions TallyPrime already has a voucher for (same date, amount and bank ledger) are marked and left unticked.</p>
+      <div id="entered-status" role="status" aria-live="polite"></div>
       <div class="table-wrap">
         <table class="table mapping-table">
           <thead><tr><th><span class="visually-hidden">Generate</span></th><th>#</th><th>Date</th><th>Description</th>

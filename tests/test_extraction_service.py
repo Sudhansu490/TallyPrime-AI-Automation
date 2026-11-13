@@ -123,12 +123,28 @@ def test_statement_batches_are_merged_in_order() -> None:
 
 def test_conflicting_values_across_batches_flagged() -> None:
     page2 = json.loads(statement_page2_reply())
-    page2["statement"]["ifsc"] = field("SYNB0009999", "SYNTHETIC BANK - page 2", page=2)
+    page2["statement"]["ifsc"] = field("SYNB0009999", "IFSC SYNB0009999", page=2)
     pages = [PageInput(1, statement_pages()[0].text), PageInput(2, statement_pages()[1].text + "\nIFSC SYNB0009999")]
     result = run(pages, STATEMENT, FakeLlm(statement_page1_reply(), json.dumps(page2)), pages_per_call=1)
     ifsc = result.header["ifsc"]
     assert ifsc.value == "SYNB0001234" and ifsc.alternatives == ["SYNB0009999"]
     assert "conflict" in ifsc.flags and ifsc.status is Status.WARNING
+
+
+def test_header_values_without_their_label_do_not_count() -> None:
+    # A page without the account header: the model offers a narration's reference as "account number".
+    page2 = json.loads(statement_page2_reply())
+    page2["statement"]["account_number"] = field("999988887777", "NEFT-SYNB999988887777-SYNTHETIC", page=2)
+    page2["statement"]["opening_balance"] = field("55,555.00", "55,555.00", page=2)
+    page1 = json.loads(statement_page1_reply())
+    page1["statement"]["opening_balance"] = field("55,555.00", "55,555.00", page=1)
+    text2 = statement_pages()[1].text + "\nNEFT-SYNB999988887777-SYNTHETIC\n55,555.00"
+    pages = [PageInput(1, statement_pages()[0].text + "\n55,555.00"), PageInput(2, text2)]
+    result = run(pages, STATEMENT, FakeLlm(json.dumps(page1), json.dumps(page2)), pages_per_call=1)
+    account = result.header["account_number"]
+    assert account.value == "123456789012" and "conflict" not in account.flags
+    # An "opening balance" printed without its label is not used.
+    assert result.header["opening_balance"].raw is None
 
 
 def test_invalid_json_retried_once_then_accepted() -> None:
@@ -144,8 +160,9 @@ def test_invalid_json_retried_once_then_accepted() -> None:
     invoice_reply().replace('"confidence": 0.97', '"confidence": 7', 1),  # out of range
 ])
 def test_invalid_replies_are_never_accepted(bad: str) -> None:
+    # Retried, then sent in smaller parts: still never accepted.
     with pytest.raises(ExtractionError, match="did not match the required schema"):
-        run(invoice_pages(), INVOICE, FakeLlm(bad, bad))
+        run(invoice_pages(), INVOICE, FakeLlm(*[bad] * 40))
 
 
 def test_truncated_output_is_split_and_fails_only_when_parts_are_still_cut_off() -> None:
@@ -170,7 +187,15 @@ def test_provider_schema_rejection_is_retried_once() -> None:
     result = run(invoice_pages(), INVOICE, FakeLlm(rejected, invoice_reply()))
     assert result.calls == 2 and result.header["grand_total"].value == "1180.00"
     with pytest.raises(ExtractionError, match="did not match the required schema"):
-        run(invoice_pages(), INVOICE, FakeLlm(rejected, rejected))
+        run(invoice_pages(), INVOICE, FakeLlm(*[rejected] * 40))
+
+
+def test_a_reply_rejected_twice_is_retried_with_one_page_per_request() -> None:
+    rejected = LlmError("Groq rejected the reply as not matching the schema", kind="invalid_output")
+    llm = FakeLlm(rejected, rejected, statement_page1_reply(), statement_page2_reply())
+    result = run(statement_pages(), STATEMENT, llm, pages_per_call=2)
+    assert len(llm.requests) == 4 and len(result.rows) == 2
+    assert "=== Page 1 ===" in llm.requests[2]["user"] and "=== Page 2 ===" not in llm.requests[2]["user"]
 
 
 def test_rows_array_is_described_for_the_model() -> None:
@@ -282,3 +307,18 @@ def test_a_closing_balance_taken_from_a_transaction_row_is_not_used() -> None:
     result = run(statement_pages()[:1], STATEMENT, FakeLlm(json.dumps(body)), pages_per_call=1)
     closing = result.header["closing_balance"]
     assert closing.raw is None and "Not printed on the statement" in " ".join(closing.messages)
+
+
+def test_a_wrapped_narration_is_found_even_when_its_first_words_repeat() -> None:
+    from tally_automation.extraction.service import _DocumentText
+    text = "\n".join([
+        "01/04/2026  Charges for SYNTHETIC Payment            5.00   1,000.00Dr",
+        "            :000000000111",
+        "02/04/2026  Charges for SYNTHETIC Payment            7.00   1,007.00Dr",
+        "            :000000000222",
+    ])
+    doc = _DocumentText([PageInput(1, text)])
+    assert doc.contains_wrapped("Charges for SYNTHETIC Payment :000000000222")   # the second row's
+    assert doc.contains_wrapped("Charges for SYNTHETIC Payment :000000000111")
+    assert not doc.contains_wrapped("Charges for SYNTHETIC Payment :000000000333")  # never printed
+    assert not doc.contains_wrapped("Refund for SYNTHETIC Payment")

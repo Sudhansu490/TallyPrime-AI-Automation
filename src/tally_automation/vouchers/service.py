@@ -313,6 +313,10 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
             if name:
                 group = "Sundry Debtors" if p.money_out is False else "Sundry Creditors"
                 options.insert(0, Suggestion(None, name, NEW_FROM_NARRATION, group if group in groups else None))
+        if not options:
+            # The description names no party at all ("INWARD RETURN", "BY INST … MICR CLG", a bare RTGS
+            # reference): Suspense, to be moved to the right ledger once the party is known.
+            options = _suspense(masters, groups)
         counter[str(p.transaction_id)] = [s.to_json() for s in _dedupe(options)]
     return {
         "bank": [s.to_json() for s in bank],
@@ -408,7 +412,22 @@ class NewLedger:
 
 NEW_LEDGER_PREFIX = "new:"
 NEW_FROM_NARRATION = "New ledger from the narration: created in TallyPrime on import"
+NO_PARTY = "No party named in the description: Suspense, move it to the right ledger later"
+SUSPENSE_GROUP = "Suspense A/c"
 NEW_LEDGER_MAX_NAME = 100
+
+
+def _suspense(masters: Masters, groups: set[str]) -> list[Suggestion]:
+    """The company's Suspense ledger(s); if it has none, a new "Suspense" ledger under TallyPrime's
+    predefined Suspense A/c group (created on import)."""
+    found = sorted((l for l in masters.ledgers.values()
+                    if masters.in_groups(l, {SUSPENSE_GROUP}) or "suspense" in l.name.lower()),
+                   key=lambda l: (not masters.in_groups(l, {SUSPENSE_GROUP}), l.name.lower()))
+    if found:
+        return [_suggest(l, NO_PARTY) for l in found]
+    if SUSPENSE_GROUP in groups:
+        return [Suggestion(None, "Suspense", NO_PARTY, SUSPENSE_GROUP)]
+    return []
 # A new ledger may not be a bank, cash or tax ledger: those need details (account numbers, tax heads)
 # that are set up in TallyPrime itself.
 _NO_NEW_LEDGERS_UNDER = {"Bank Accounts", "Bank OD A/c", "Bank OCC A/c", "Cash-in-Hand", "Duties & Taxes"}
