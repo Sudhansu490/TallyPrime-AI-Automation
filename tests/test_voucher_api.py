@@ -245,3 +245,23 @@ def test_party_named_in_the_narration_beats_an_accepted_prefill_but_not_a_delibe
     # Choosing the named party again forgets the override; the named party leads again.
     submit("Synthetic Vendor")
     assert first(document_id)["name"] == "Synthetic Vendor"
+
+
+def test_a_statement_uploaded_as_an_invoice_is_processed_again_as_a_statement(client: TestClient, tally: FakeTally) -> None:
+    import json as _json
+    # Uploaded as a purchase invoice; the model says it is a bank statement.
+    document_id = upload(client, text_pdf(STATEMENT_PAGE_1, STATEMENT_PAGE_2), "purchase_invoice")
+    wrong = _json.loads(invoice_reply())
+    wrong["document_check"] = {"is_expected_type": False, "reason": "Document is a bank statement, not a purchase invoice"}
+    process(client, FakeLlm(_json.dumps(wrong), _json.dumps(wrong)), pages_per_call=1)
+    assert client.get(f"/api/v1/documents/{document_id}").json()["validation"]["outcome"] == "failed"
+
+    queued = client.post(f"/api/v1/documents/{document_id}/reprocess", json={"document_type": "bank_statement"})
+    assert queued.status_code == 200 and queued.json()["document_type"] == "bank_statement"
+    process(client, FakeLlm(statement_page1_reply(), statement_page2_reply()), pages_per_call=1)
+    document = client.get(f"/api/v1/documents/{document_id}").json()
+    assert (document["document_type"], document["status"]) == ("bank_statement", "processed")
+    assert len(client.get(f"/api/v1/documents/{document_id}/extraction").json()["data"]["rows"]) == 2
+    # Reprocessing without a type keeps the type it has.
+    assert client.post(f"/api/v1/documents/{document_id}/reprocess").status_code in (200, 409)
+    assert client.get(f"/api/v1/documents/{document_id}").json()["document_type"] == "bank_statement"

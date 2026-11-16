@@ -189,3 +189,12 @@ def test_a_description_with_no_party_gets_suspense() -> None:
     assert (proposed.guid, proposed.name, proposed.parent, proposed.reason) == (None, "Suspense", "Suspense A/c", NO_PARTY)
     m.ledgers["l-Suspense"] = _ledger("Suspense", "Suspense A/c")
     assert [(s.guid, s.name) for s in _suspense(m, {"Suspense A/c"})] == [("l-Suspense", "Suspense")]
+
+
+def test_a_party_is_the_same_however_the_bank_writes_it() -> None:
+    from tally_automation.vouchers.matching import party_key
+    keys = {party_key(n) for n in ("NEFT_OUT:SYNB0000000001/QUILLSTONE TRADING /SYNB0001234/1234567890",
+                                   "RTGS-SYNBR52026100000000001-QUILLSTONE TRADING",
+                                   "NEFT-SYNB630000000001-Quillstone Trading")}
+    assert keys == {"quillstone trading"}
+    assert party_key("CASH HAND CHARGE3 - 04-11-2026") is None and party_key("RTGS-SYNBR000000001-P D") is None

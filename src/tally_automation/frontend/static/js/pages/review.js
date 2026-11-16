@@ -51,6 +51,22 @@ function cellClass(field) {
 
 // ---- Rendering ----------------------------------------------------------------------
 
+async function retype(documentType, button) {
+  const label = DOCUMENT_TYPE_LABELS[documentType].toLowerCase();
+  if (!window.confirm(`Read document #${state.documentId} again as a ${label}?\n\n` +
+      "The current extraction stays on record; corrections made here are not carried over.")) return;
+  button.disabled = true;
+  showMessage($("page-message"), "loading", `Queuing it as a ${label}…`);
+  try {
+    await api.post(`/documents/${state.documentId}/reprocess`, { document_type: documentType });
+    showMessage($("page-message"), "success", `Queued as a ${label}. Opening the Processing page…`);
+    window.location.href = `/processing?document=${state.documentId}`;
+  } catch (error) {
+    showError($("page-message"), error);
+    button.disabled = false;
+  }
+}
+
 function renderOverview(data) {
   const run = data.run;
   $("run-meta").textContent =
@@ -61,6 +77,19 @@ function renderOverview(data) {
   clear(issues);
   for (const issue of data.document_issues) {
     issues.append(el("p", { className: "alert alert-warning", text: issue, attrs: { role: "alert" } }));
+  }
+  // The AI says this is the other kind of document (uploaded with the wrong type): offer to read it again
+  // as that type. The same file cannot be uploaded again (it would be a duplicate).
+  const other = data.document_type === "purchase_invoice" ? "bank_statement" : "purchase_invoice";
+  const saysOther = other === "bank_statement" ? /bank (account )?statement|account statement/i : /\binvoice\b|\bbill\b/i;
+  if (data.document_issues.some((issue) => saysOther.test(issue) && /\bnot\b/i.test(issue))) {
+    const button = el("button", { className: "btn", text: `Process as ${DOCUMENT_TYPE_LABELS[other].toLowerCase()}`, attrs: { type: "button" } });
+    button.addEventListener("click", () => retype(other, button));
+    issues.append(el("div", { className: "alert alert-info" }, [
+      el("span", { text: `This looks like a ${DOCUMENT_TYPE_LABELS[other].toLowerCase()}, but it was uploaded as a ` +
+        `${DOCUMENT_TYPE_LABELS[data.document_type].toLowerCase()}. ` }),
+      button,
+    ]));
   }
   const s = data.summary;
   const summary = $("summary");

@@ -367,13 +367,31 @@ def _call_in_pieces(
     except (RequestTooLarge, OutputCutOff) as exc:
         halves = _halves(page) if depth < MAX_PAGE_SPLITS else None
         if halves is None:
+            if depth > 0:
+                # The smallest part of a page still failed (on Groq's free plan the model's reasoning can use
+                # up the small answer allowance): note it and go on with the rest of the page.
+                record.setdefault("failed_parts", []).append((page.page_number, exc))
+                return []
             if isinstance(exc, OutputCutOff):
                 raise
             raise _page_too_large(page) from None
         logger.warning("LLM request too large; sending the page in two halves",
                        extra={"page": page.page_number, "split": depth + 1})
-        return [part for half in halves for part in _call_in_pieces(
+        parts = [part for half in halves for part in _call_in_pieces(
             client, document_type, half, total_pages, model_cls, schema, record, depth + 1)]
+        if depth == 0:
+            failed = [e for n, e in record.get("failed_parts", []) if n == page.page_number]
+            record["failed_parts"] = [(n, e) for n, e in record.get("failed_parts", []) if n != page.page_number]
+            if failed and not parts:
+                # Nothing of the page could be read: the document cannot be read this way.
+                if isinstance(failed[-1], OutputCutOff):
+                    raise failed[-1]
+                raise _page_too_large(page) from None
+            if failed:
+                # Only some parts failed: skip just those, and say so (the running balance shows what is missing).
+                logger.warning("LLM could not read part of a page; skipped", extra={"page": page.page_number})
+                record.setdefault("skipped_pages", []).append(page.page_number)
+        return parts
 
 
 def _page_too_large(page: PageInput) -> ExtractionError:
@@ -420,6 +438,9 @@ def extract_document(
         f"Pages {batch[0].page_number}-{batch[-1].page_number}: {reply.document_check.reason or 'not the expected document type'}"
         for batch, reply in zip(batches, replies) if not reply.document_check.is_expected_type
     ]
+    for page_number in sorted(set(record.get("skipped_pages", []))):
+        issues.append(f"Part of page {page_number} could not be read by the AI (its answer kept being cut off): "
+                      "check that page's transactions against the statement.")
 
     header: dict[str, FieldResult] = {}
     for spec in schema_def.header_fields:

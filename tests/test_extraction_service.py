@@ -322,3 +322,13 @@ def test_a_wrapped_narration_is_found_even_when_its_first_words_repeat() -> None
     assert doc.contains_wrapped("Charges for SYNTHETIC Payment :000000000111")
     assert not doc.contains_wrapped("Charges for SYNTHETIC Payment :000000000333")  # never printed
     assert not doc.contains_wrapped("Refund for SYNTHETIC Payment")
+
+
+def test_a_part_that_still_fails_is_skipped_and_the_rest_of_the_page_is_kept() -> None:
+    cut = LlmError("Groq cut the reply off at the answer allowance", kind="cut_off")
+    empty = json.loads(statement_page1_reply())
+    empty["transactions"] = []
+    # The page is refused, then its first half reads fine and its second half keeps failing.
+    llm = FakeLlm(cut, json.dumps(empty), *[cut] * 30)
+    result = run(statement_pages()[:1], STATEMENT, llm, pages_per_call=2)
+    assert any("Part of page 1 could not be read" in issue for issue in result.document_check_issues)

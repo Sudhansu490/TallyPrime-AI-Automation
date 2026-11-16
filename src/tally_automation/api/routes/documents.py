@@ -410,16 +410,22 @@ def _page_out(page: DocumentPage, threshold: float) -> PageTextOut:
     )
 
 
+class ReprocessIn(BaseModel):
+    document_type: DocumentType | None = None
+
+
 @router.post(
     "/{document_id}/reprocess", response_model=DocumentOut,
     responses={404: {"model": ErrorOut}, 409: {"model": ErrorOut}},
 )
-def reprocess_document(document_id: int, ingestor: IngestorDep, user: Reviewer) -> DocumentOut | JSONResponse:
+def reprocess_document(document_id: int, ingestor: IngestorDep, user: Reviewer,
+                       body: ReprocessIn | None = None) -> DocumentOut | JSONResponse:
     """Queue a new attempt (all stages) for a failed document, for one whose AI
     extraction has not run yet, or for a processed one whose validation failed and
-    that has no generated vouchers. Earlier attempts are kept."""
+    that has no generated vouchers. Earlier attempts are kept. With ``document_type``
+    the document is processed as that type (it was uploaded as the wrong kind)."""
     try:
-        requeue_document(ingestor.session_factory, document_id)
+        requeue_document(ingestor.session_factory, document_id, body.document_type if body else None)
     except RequeueError as exc:
         code = status.HTTP_404_NOT_FOUND if exc.code == "not_found" else status.HTTP_409_CONFLICT
         return _error(code, exc.message, exc.code)

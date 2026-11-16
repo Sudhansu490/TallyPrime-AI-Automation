@@ -52,5 +52,6 @@ def client(settings: Settings, migrated_engine: Engine) -> Iterator[TestClient]:
     with TestClient(create_app(settings), base_url="http://127.0.0.1") as test_client:
         # Phase 9: every page and API needs a login. Tests run as a synthetic admin
         # unless they log out or log in as another role (see auth_helpers).
+        test_client.app.state.learn_after_sync = False   # tests call the learning step themselves
         login_as(test_client)
         yield test_client

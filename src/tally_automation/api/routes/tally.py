@@ -7,6 +7,9 @@ stored snapshot; towards TallyPrime it sends export (read) requests only.
 
 from __future__ import annotations
 
+import logging
+import threading
+
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
@@ -24,6 +27,10 @@ from tally_automation.db.models import (
 from tally_automation.extraction.parsing import mask_account_number
 from tally_automation.tally.client import TallyConfigError, create_tally_client
 from tally_automation.tally.service import SyncError, check_connection, sync_company
+from tally_automation.tally.client import TallyConnectionError
+from tally_automation.tally.xmlio import TallyResponseError
+from tally_automation.vouchers.history import learn_from_tally
+from tally_automation.vouchers.service import VoucherError
 
 router = APIRouter(prefix="/tally", tags=["tally"])
 
@@ -141,6 +148,30 @@ def _client(request: Request, settings):
     return create_tally_client(settings, transport=getattr(request.app.state, "tally_transport", None))
 
 
+logger = logging.getLogger(__name__)
+
+
+def _learn_in_background(request: Request, settings, company_guid: str) -> None:
+    """After masters are retrieved: learn which ledger each party was booked to (reading a year of vouchers
+    takes tens of seconds, so the request does not wait for it)."""
+    factory = request.app.state.session_factory
+    transport = getattr(request.app.state, "tally_transport", None)
+
+    def run() -> None:
+        try:
+            with create_tally_client(settings, transport=transport) as client:
+                learn_from_tally(factory, client, company_guid)
+        except Exception:  # noqa: BLE001 - a background helper; the next retrieval tries again
+            logger.exception("learning party ledgers from TallyPrime failed")
+
+    threading.Thread(target=run, name="learn-party-ledgers", daemon=True).start()
+
+
+class LearnOut(BaseModel):
+    vouchers_read: int
+    parties: int
+
+
 # ---- Endpoints ---------------------------------------------------------------------------
 
 @router.get("/status", response_model=StatusOut)
@@ -184,7 +215,29 @@ def tally_sync(body: SyncIn, request: Request, session: SessionDep, settings: Se
     session.expire_all()
     run = session.get(TallySyncRun, run_id)
     assert run is not None
+    if run.company_guid and getattr(request.app.state, "learn_after_sync", True):
+        _learn_in_background(request, settings, run.company_guid)
     return _run_out(run)
+
+
+@router.post("/companies/{company_guid}/learn", response_model=LearnOut, responses={404: {}, 409: {}, 502: {}})
+def tally_learn(company_guid: str, request: Request, session: SessionDep, settings: SettingsDep,
+                user: Reviewer) -> LearnOut | JSONResponse:
+    """Learn, from the past year of TallyPrime vouchers (read only), which ledger each party was booked to."""
+    if not _company_known(session, company_guid):
+        return _error(404, "not_found", "No retrieved masters for this company.")
+    try:
+        client = _client(request, settings)
+    except TallyConfigError as exc:
+        return _error(409, "not_configured", str(exc))
+    try:
+        with client:
+            vouchers, parties = learn_from_tally(request.app.state.session_factory, client, company_guid)
+    except VoucherError as exc:
+        return _error(409, exc.code, exc.message)
+    except (TallyConnectionError, TallyResponseError) as exc:
+        return _error(502, "tally_error", f"TallyPrime could not be read: {exc}")
+    return LearnOut(vouchers_read=vouchers, parties=parties)
 
 
 @router.get("/sync-runs", response_model=list[SyncRunOut])

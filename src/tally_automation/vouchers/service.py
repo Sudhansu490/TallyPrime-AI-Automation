@@ -141,6 +141,30 @@ def category_key(kind: str) -> str:
     return f"category:{kind}"
 
 
+def party_memory_key(party: str) -> str:
+    """Memory key for the ledger chosen for a party (payee), however the bank wrote the narration."""
+    return f"party:{party}"[:128]
+
+
+TALLY_PARTY_PREFIX = "tally-party:"
+
+
+def tally_party_key(party: str) -> str:
+    """Memory key for the ledger a party has been booked to in TallyPrime (see vouchers.history)."""
+    return (TALLY_PARTY_PREFIX + party)[:128]
+
+
+def _learned_ledgers(history: dict[str, MappingMemory], party: str) -> list[tuple[str, int]]:
+    """Ledgers this party was booked to in TallyPrime, most used first. Banks cut names short, so a learned
+    party matches when either name holds the other as whole words ("saiastra" / "saiastra technologies")."""
+    padded = f" {party} "
+    totals: dict[str, int] = {}
+    for learned, memory in history.items():
+        if memory.ledger_guid and (f" {learned} " in padded or padded in f" {learned} "):
+            totals[memory.ledger_guid] = totals.get(memory.ledger_guid, 0) + memory.use_count
+    return sorted(totals.items(), key=lambda t: -t[1])
+
+
 def override_key(description_key: str | None) -> str | None:
     """Memory key for a ledger the user chose *instead of* the party named in the narration."""
     return f"override:{description_key}"[:128] if description_key else None
@@ -275,6 +299,9 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
     bank = _dedupe(bank)
     bank_guids = {s.guid for s in bank[:1] if s.guid}
     counter: dict[str, list[dict[str, Any]]] = {}
+    history = {m.key[len(TALLY_PARTY_PREFIX):]: m for m in session.scalars(select(MappingMemory).where(
+        MappingMemory.company_guid == masters.company_guid, MappingMemory.purpose == MappingPurpose.COUNTER,
+        MappingMemory.key.like(TALLY_PARTY_PREFIX + "%")))}
     groups = set(creatable_groups(masters))
     for p in plans:
         key = description_key(p.description)
@@ -294,6 +321,15 @@ def _statement_suggestions(session: Session, masters: Masters, statement: BankSt
         # A ledger the user picked over the party named in the narration wins; then the named party;
         # then what was simply used last time (which may only have been an accepted pre-fill).
         options += _memory_suggestion(session, masters, MappingPurpose.COUNTER, override_key(key))
+        # The party's own history: the ledger chosen for this payee here before, then the ledger it has
+        # been booked to in TallyPrime (learned from the past year's vouchers).
+        party = matching.party_key(p.description)
+        if party:
+            options += [Suggestion(s.guid, s.name, "Chosen last time for this party", s.parent, s.gstin)
+                        for s in _memory_suggestion(session, masters, MappingPurpose.COUNTER, party_memory_key(party))]
+            for guid, times in _learned_ledgers(history, party):
+                if guid in masters.ledgers:
+                    options.append(_suggest(masters.ledgers[guid], f"Used for this party in TallyPrime before ({times} time(s))"))
         named = matching.party_in_narration(masters, p.description, p.money_out, bank_guids)
         if named is not None:
             options.append(_suggest(named.ledger, named.reason))
@@ -684,6 +720,9 @@ def generate_statement(session: Session, document_id: int, company_guid: str, ch
         ))
         key = description_key(plan.description)
         _remember(session, company.guid, MappingPurpose.COUNTER, key, counter.guid, counter.name)
+        party = matching.party_key(plan.description)
+        if party:
+            _remember(session, company.guid, MappingPurpose.COUNTER, party_memory_key(party), counter.guid, counter.name)
         named = matching.party_in_narration(masters, plan.description, plan.money_out, {bank.guid})
         if named is not None and named.ledger.guid != counter.guid:
             _remember(session, company.guid, MappingPurpose.COUNTER, override_key(key), counter.guid, counter.name)

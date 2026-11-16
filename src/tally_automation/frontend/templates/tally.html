@@ -39,10 +39,17 @@
 <section class="card" aria-labelledby="masters-heading">
   <div class="section-header">
     <h2 id="masters-heading">Retrieved masters</h2>
-    <label class="inline-label">Company
-      <select id="company-select" aria-label="Company whose masters to show"></select>
-    </label>
+    <div class="actions">
+      <label class="inline-label">Company
+        <select id="company-select" aria-label="Company whose masters to show"></select>
+      </label>
+      <button type="button" class="btn btn-secondary" id="learn"
+              title="Read the past year of vouchers (read only) to learn which ledger each party was booked to">
+        Learn from past entries</button>
+    </div>
   </div>
+  <p class="small muted">After “Retrieve masters” the app also learns, from the past year of vouchers, which ledger
+    each party was booked to; the Generate page then suggests that ledger first. “Learn from past entries” does it again now.</p>
   <div id="masters-message" role="status" aria-live="polite"></div>
   <p class="small muted" id="masters-meta"></p>
   <div class="tabs" role="tablist" aria-label="Master type">

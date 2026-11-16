@@ -539,3 +539,57 @@ def test_each_tally_voucher_pairs_with_one_transaction_only(local: TestClient, t
     local.app.state.settings.tally_host = None
     off = entered(local, document_id).json()
     assert (off["checked"], off["entries"]) == (False, [])
+
+
+# ---- Party ledgers learned from TallyPrime's past vouchers ------------------------------------------
+
+def bank_style_statement(client: TestClient) -> tuple[int, dict]:
+    """The synthetic statement with its payment narrated the way banks print transfers."""
+    narration = "NEFT-SYNB000001-QUILLSTONE TRADING"
+    page1 = STATEMENT_PAGE_1.replace("NEFT SYNTHETIC VENDOR UTR123", narration)
+    reply = statement_page1_reply().replace("NEFT SYNTHETIC VENDOR UTR123", narration).replace('"UTR123"', "null")
+    document_id = upload(client, text_pdf(page1, STATEMENT_PAGE_2), "bank_statement")
+    process(client, FakeLlm(reply, statement_page2_reply()), pages_per_call=1)
+    out, _ = setup(client, document_id)["statement"]["transactions"]
+    return document_id, out
+
+
+def test_the_ledger_a_party_was_booked_to_in_tally_is_suggested_first(local: TestClient, tally: FakeTally) -> None:
+    from tally_fakes import COMPANY_GUID
+    # In TallyPrime, payments to this party (narrated by the bank, with another reference) were booked to the
+    # supplier ledger twice and once to cash: the most used one wins.
+    for i, ledger_name in enumerate(["Synthetic Supplier Pvt Ltd", "Synthetic Supplier Pvt Ltd", "Synthetic Cash"]):
+        tally.vouchers.append({"date": f"2026030{i + 1}", "type": "Payment", "guid": f"old-{i}", "master_id": str(500 + i),
+                               "narration": f"RTGS-SYNBR00000000{i}-QUILLSTONE TRADING",
+                               "entries": [(ledger_name, "-100.00"), ("Synthetic Bank", "100.00")]})
+    learned = local.post(f"/api/v1/tally/companies/{COMPANY_GUID}/learn")
+    assert learned.status_code == 200 and learned.json()["parties"] == 1, learned.text
+    assert all("Import Data" not in r.content.decode() for r in tally.requests)           # read only
+
+    document_id, out = bank_style_statement(local)
+    first = setup(local, document_id)["suggestions"]["counter"][str(out["id"])][0]
+    assert first["name"] == "Synthetic Supplier Pvt Ltd" and first["reason"].startswith("Used for this party in TallyPrime")
+
+    # Choosing a ledger for the party here is remembered for the party itself, above TallyPrime's history.
+    made = generate(local, document_id, statement={
+        "bank": guid("Synthetic Bank"), "voucher_types": {"payment": "Payment", "receipt": "Receipt", "contra": "Contra"},
+        "transactions": [{"transaction_id": out["id"], "ledger": guid("Synthetic Cash")}]})
+    assert made.status_code == 200, made.text
+    first = setup(local, document_id)["suggestions"]["counter"][str(out["id"])][0]
+    assert first["name"] == "Synthetic Cash"
+
+
+def test_learning_says_at_once_when_the_company_is_not_open_and_reads_month_by_month(
+        local: TestClient, tally: FakeTally) -> None:
+    from tally_fakes import COMPANY_GUID
+    tally.loaded = False
+    tally.requests.clear()
+    closed = local.post(f"/api/v1/tally/companies/{COMPANY_GUID}/learn")
+    assert closed.status_code == 409 and closed.json()["code"] == "company_not_open"
+    assert "not open in TallyPrime" in closed.json()["detail"]
+    assert [kind(r) for r in tally.requests] == ["companies"]                 # no long voucher read
+    tally.loaded = True
+    tally.requests.clear()
+    assert local.post(f"/api/v1/tally/companies/{COMPANY_GUID}/learn").status_code == 200
+    reads = [r for r in tally.requests if b"AppPeriodVouchers" in r.content]
+    assert 12 <= len(reads) <= 13                                             # a year, a month per request

@@ -409,3 +409,14 @@ def counter_ledgers(masters: Masters, description: str | None, money_out: bool |
         # No ledger with the narration's party name: a close spelling of it, then names that look similar.
         out += [c for _, c in _by_similar_name(masters, text, money_out, LOOKS_SIMILAR_MIN)]
     return [c for c in _unique(out) if c.ledger.guid not in bank_guids]
+
+
+def party_key(description: str | None) -> str | None:
+    """The payee named in a transfer narration, in a form that is the same however the bank writes it
+    ("NEFT_OUT:<ref>/SYNTHETIC CO/<IFSC>" and "RTGS-<ref>-SYNTHETIC CO" both give "synthetic"), for
+    remembering which ledger a party is booked to."""
+    for segment in party_segments(description):
+        key = " ".join(w for w in name_tokens(segment) if w not in _NOISE)
+        if len(re.sub(r"[^a-z]", "", key)) >= 4:
+            return key[:100]
+    return None

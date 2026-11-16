@@ -88,6 +88,22 @@ async function retrieve(company, button) {
 
 // ---- Stored masters ------------------------------------------------------------------
 
+async function learn() {
+  if (!state.company) return;
+  const button = $("learn");
+  button.disabled = true;
+  showMessage($("masters-message"), "loading", "Reading the past year of vouchers from TallyPrime (read only)… this can take a minute.");
+  try {
+    const r = await api.post(`/tally/companies/${encodeURIComponent(state.company)}/learn`, {}, { timeoutMs: 600000 });
+    showMessage($("masters-message"), "success",
+      `Learned the usual ledger of ${r.parties} part${r.parties === 1 ? "y" : "ies"} from ${r.vouchers_read} vouchers.`);
+  } catch (error) {
+    showError($("masters-message"), error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function loadCompanies() {
   const select = $("company-select");
   try {
@@ -229,6 +245,7 @@ async function loadRuns() {
 // ---- Wiring ----------------------------------------------------------------------------
 
 $("check").addEventListener("click", checkConnection);
+$("learn").addEventListener("click", learn);
 $("company-select").addEventListener("change", (e) => { state.company = e.target.value; state.offset = 0; loadCompanies(); });
 $("tab-ledgers").addEventListener("click", () => selectTab("ledgers"));
 $("tab-groups").addEventListener("click", () => selectTab("groups"));

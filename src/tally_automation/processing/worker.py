@@ -32,6 +32,7 @@ from tally_automation.db.models import (
 )
 from tally_automation.db.session import transaction
 from tally_automation.documents.storage import DocumentStorage
+from tally_automation.documents.validation import ALLOWED_MEDIA_TYPES
 from tally_automation.extraction.llm import LlmClient
 from tally_automation.extraction.records import save_extraction
 from tally_automation.extraction.service import ExtractionError, PageInput, extract_document
@@ -359,8 +360,10 @@ def _failed_validation_without_vouchers(session: Session, document: Document) ->
     ) is None
 
 
-def requeue_document(session_factory: sessionmaker[Session], document_id: int) -> int:
-    """Queue a new processing attempt (all stages). Returns the new job id."""
+def requeue_document(session_factory: sessionmaker[Session], document_id: int,
+                     document_type: DocumentType | None = None) -> int:
+    """Queue a new processing attempt (all stages). Returns the new job id. With ``document_type``, the
+    document is first changed to that type (it was uploaded as the wrong kind of document)."""
     with transaction(session_factory) as session:
         document = session.scalar(
             select(Document).options(selectinload(Document.jobs)).where(Document.id == document_id)
@@ -374,6 +377,13 @@ def requeue_document(session_factory: sessionmaker[Session], document_id: int) -
                 "whose validation failed and that have no generated vouchers can be reprocessed "
                 f"(this one is {document.status.value}).",
             )
+        if document_type is not None and document_type is not document.document_type:
+            if document.file.media_type not in ALLOWED_MEDIA_TYPES[document_type]:
+                raise RequeueError("wrong_media", f"A {document.file.media_type} file cannot be processed as a "
+                                                  f"{document_type.value.replace('_', ' ')}.")
+            logger.info("document type changed", extra={"document_id": document_id, "from": document.document_type.value,
+                                                         "to": document_type.value})
+            document.document_type = document_type
         attempt = max((job.attempt for job in document.jobs), default=0) + 1
         job = ProcessingJob(document=document, attempt=attempt)
         document.status = DocumentStatus.QUEUED
