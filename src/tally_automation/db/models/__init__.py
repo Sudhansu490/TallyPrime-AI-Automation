@@ -22,6 +22,11 @@ from tally_automation.db.models.extraction import (
     Invoice,
     InvoiceLineItem,
 )
+from tally_automation.db.models.reconciliation import (
+    ReconciliationAccount,
+    ReconciliationEvent,
+    ReconciliationEventKind,
+)
 from tally_automation.db.models.tally import (
     SyncStatus,
     TallyCompany,
@@ -86,6 +91,9 @@ __all__ = [
     "MediaType",
     "ProcessingJob",
     "ProcessingStage",
+    "ReconciliationAccount",
+    "ReconciliationEvent",
+    "ReconciliationEventKind",
     "ReviewDecision",
     "StageStatus",
     "SyncStatus",

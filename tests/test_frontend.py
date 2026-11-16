@@ -58,6 +58,7 @@ PAGES = [
     ("/tally", "TallyPrime integration", "pages/tally.js"),
     ("/generate", "Voucher generation", "pages/generate.js"),
     ("/vouchers", "Voucher review", "pages/vouchers.js"),
+    ("/reconciliation", "Bank reconciliation", "pages/reconciliation.js"),
 ]
 
 
@@ -117,6 +118,7 @@ def test_unbuilt_pages_are_not_served(client: TestClient) -> None:
         ("/static/js/pages/tally.js", "text/javascript"),
         ("/static/js/pages/generate.js", "text/javascript"),
         ("/static/js/pages/vouchers.js", "text/javascript"),
+        ("/static/js/pages/reconciliation.js", "text/javascript"),
         ("/static/js/pages/login.js", "text/javascript"),
         ("/static/js/pages/account.js", "text/javascript"),
         ("/static/js/voucher_view.js", "text/javascript"),

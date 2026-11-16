@@ -50,6 +50,7 @@ NAV_ITEMS: tuple[NavItem, ...] = (
     NavItem("TallyPrime", "/tally", 6, True),
     NavItem("Generate", "/generate", 7, True),
     NavItem("Vouchers", "/vouchers", 8, True),
+    NavItem("Reconciliation", "/reconciliation", 10, True),
 )
 
 # The document workflow, shown as a step bar on these pages.
@@ -140,3 +141,8 @@ def vouchers(request: Request) -> HTMLResponse:
 @router.get("/generate", response_class=HTMLResponse)
 def generate(request: Request) -> HTMLResponse:
     return _render(request, "generate.html", title="Voucher generation", page_script="pages/generate.js")
+
+
+@router.get("/reconciliation", response_class=HTMLResponse)
+def reconciliation(request: Request) -> HTMLResponse:
+    return _render(request, "reconciliation.html", title="Bank reconciliation", page_script="pages/reconciliation.js")

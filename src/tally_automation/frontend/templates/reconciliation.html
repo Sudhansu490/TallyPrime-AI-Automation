@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>Bank reconciliation</h1>
+  <form class="actions" id="account-form">
+    <label class="inline-label">Bank account
+      <select id="account-select" aria-label="Bank account to reconcile"></select>
+    </label>
+    <button type="button" class="btn btn-secondary" id="reload">Reload</button>
+  </form>
+</div>
+
+<div id="page-message" role="status" aria-live="polite"></div>
+<div id="unassigned"></div>
+
+<section class="card" aria-labelledby="account-heading" id="account-card" hidden>
+  <h2 id="account-heading">Account</h2>
+  <dl class="detail-list" id="account-details"></dl>
+  <h3 class="small-heading">TallyPrime bank ledger</h3>
+  <p class="small muted">The ledger this account is booked to in TallyPrime, from the masters retrieved on the
+    TallyPrime page. It is used to compare transactions with TallyPrime (read only); nothing is sent to TallyPrime.</p>
+  <div id="ledger-current"></div>
+  <form class="filters" id="ledger-form">
+    <label>Company<select id="ledger-company"></select></label>
+    <label>Bank ledger<select id="ledger-select"></select></label>
+    <label>Note <span class="muted">(optional)</span><input type="text" id="ledger-note" maxlength="500" autocomplete="off"></label>
+    <div class="actions align-end">
+      <button type="submit" class="btn" id="ledger-save">Link ledger</button>
+      <button type="button" class="btn btn-secondary" id="ledger-unlink" hidden>Unlink</button>
+    </div>
+  </form>
+  <div id="ledger-suggestions"></div>
+  <div id="ledger-message" role="status" aria-live="polite"></div>
+</section>
+
+<section class="card" aria-labelledby="summary-heading" id="summary-card" hidden>
+  <h2 id="summary-heading">Summary</h2>
+  <dl class="stat-grid" id="summary"></dl>
+  <p class="small muted">
+    Closing balance = opening balance + total credits − total debits, compared with the closing balance the
+    statement prints. Each opening balance is also compared with the previous period's closing balance.
+    Every figure comes from the reviewed statements and says where it came from; a figure the statements do not
+    show is left blank, and a period without a statement is <strong>missing</strong>, never a zero balance.
+    Differences are exact: ₹0.01 is a difference.
+  </p>
+</section>
+
+<section class="card" aria-labelledby="views-heading" id="views-card" hidden>
+  <h2 id="views-heading" class="visually-hidden">Reconciliation views</h2>
+  <div class="tabs recon-tabs" role="tablist" aria-label="Reconciliation view">
+    <button type="button" class="tab" role="tab" id="tab-monthly" aria-selected="true" aria-controls="panel-monthly">Monthly</button>
+    <button type="button" class="tab" role="tab" id="tab-yearly" aria-selected="false" aria-controls="panel-yearly">Financial years</button>
+    <button type="button" class="tab" role="tab" id="tab-missing" aria-selected="false" aria-controls="panel-missing">Missing statements</button>
+    <button type="button" class="tab" role="tab" id="tab-statements" aria-selected="false" aria-controls="panel-statements">Statements</button>
+  </div>
+
+  <div id="panel-monthly" role="tabpanel" aria-labelledby="tab-monthly">
+    <form class="filters" id="monthly-form">
+      <label>From month<input type="month" id="month-from" required></label>
+      <label>To month<input type="month" id="month-to" required></label>
+      <div class="actions align-end"><button type="submit" class="btn btn-secondary">Show</button></div>
+    </form>
+    <div id="monthly-message" role="status" aria-live="polite"></div>
+    <div class="table-wrap">
+      <table class="table recon-table">
+        <thead><tr>
+          <th>Month</th><th class="num">Opening</th><th class="num">Credits</th><th class="num">Debits</th>
+          <th class="num">Calculated closing</th><th class="num">Closing</th><th class="num">Difference</th>
+          <th>Opening vs previous closing</th><th>Status</th><th><span class="visually-hidden">Details</span></th>
+        </tr></thead>
+        <tbody id="monthly-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="panel-yearly" role="tabpanel" aria-labelledby="tab-yearly" hidden>
+    <form class="filters" id="yearly-form">
+      <label>From financial year<select id="fy-from"></select></label>
+      <label>To financial year<select id="fy-to"></select></label>
+      <div class="actions align-end"><button type="submit" class="btn btn-secondary">Show</button></div>
+    </form>
+    <p class="small muted">Financial years run from 1 April to 31 March. Each year's opening balance on 1 April is compared
+      with the previous year's closing balance on 31 March.</p>
+    <div id="yearly-message" role="status" aria-live="polite"></div>
+    <div class="table-wrap">
+      <table class="table recon-table">
+        <thead><tr>
+          <th>Financial year</th><th class="num">Opening (1 Apr)</th><th class="num">Credits</th><th class="num">Debits</th>
+          <th class="num">Calculated closing</th><th class="num">Closing (31 Mar)</th><th class="num">Difference</th>
+          <th>Opening vs previous year</th><th>Status</th><th><span class="visually-hidden">Details</span></th>
+        </tr></thead>
+        <tbody id="yearly-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="panel-missing" role="tabpanel" aria-labelledby="tab-missing" hidden>
+    <div id="missing-message" role="status" aria-live="polite"></div>
+    <div id="missing-content"></div>
+  </div>
+
+  <div id="panel-statements" role="tabpanel" aria-labelledby="tab-statements" hidden>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr>
+          <th>Document</th><th>Period</th><th class="num">Opening</th><th class="num">Closing</th>
+          <th class="num">Transactions</th><th>Validation</th><th>Notes</th>
+        </tr></thead>
+        <tbody id="statements-body"></tbody>
+      </table>
+    </div>
+    <h3 class="small-heading">Change history</h3>
+    <ul class="plain-list small" id="events"></ul>
+  </div>
+</section>
+{% endblock %}

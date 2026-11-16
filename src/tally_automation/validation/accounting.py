@@ -514,6 +514,26 @@ def _running_balance(
     return checks, checked, mismatched
 
 
+def chronological_rows(rows: list[Fields], opening: Decimal | None) -> tuple[list[tuple[int, Fields]], str]:
+    """Statement rows (numbered from 1 as printed) in chronological order, and how they were printed:
+    ``ascending``, ``descending`` (newest first), ``mixed`` (kept in printed order), or
+    ``same_day_newest_first`` (one date only; the printed balances show the newest is on top)."""
+    dates = [day(r, "txn_date") for r in rows]
+    order = _order(dates)
+    numbered = list(enumerate(rows, start=1))
+    if order == "descending" and len({d for d in dates if d is not None}) > 1:
+        numbered.reverse()
+        return numbered, "descending"
+    if order == "mixed":
+        return numbered, "mixed"
+    if len({d for d in dates if d is not None}) <= 1 and len(rows) > 1:
+        # The dates cannot tell the order (all on one day): the printed balances can.
+        newest_first = list(reversed(numbered))
+        if _running_balance(newest_first, opening)[2] < _running_balance(numbered, opening)[2]:
+            return newest_first, "same_day_newest_first"
+    return numbered, "ascending"
+
+
 def statement_checks(header: Fields, rows: list[Fields], *, today: date) -> list[Check]:
     checks: list[Check] = []
     checks += extraction_checks(STATEMENT_FIELDS, header)
@@ -571,12 +591,9 @@ def statement_checks(header: Fields, rows: list[Fields], *, today: date) -> list
                 ))
 
     # ---- Running balance, in chronological order
-    dates = [day(r, "txn_date") for r in rows]
-    order = _order(dates)
     opening, closing = amount(header, "opening_balance"), amount(header, "closing_balance")
-    numbered = list(enumerate(rows, start=1))
+    numbered, order = chronological_rows(rows, opening)
     if order == "descending":
-        numbered.reverse()
         checks.append(Check(
             "row_order", "accounting", Severity.INFO, True,
             "Transactions are listed newest first; balances were checked from the bottom up.",
@@ -586,16 +603,12 @@ def statement_checks(header: Fields, rows: list[Fields], *, today: date) -> list
             "row_order", "accounting", Severity.WARNING, False,
             "Transaction dates are not in order; balances were checked in the printed order.",
         ))
-    elif len({d for d in dates if d is not None}) <= 1 and len(rows) > 1:
-        # The dates cannot tell the order (all on one day): the printed balances can.
-        newest_first = list(reversed(numbered))
-        if (_running_balance(newest_first, opening)[2] < _running_balance(numbered, opening)[2]):
-            numbered = newest_first
-            checks.append(Check(
-                "row_order", "accounting", Severity.INFO, True,
-                "All transactions share one date and the balances show they are listed newest first; "
-                "balances were checked from the bottom up.",
-            ))
+    elif order == "same_day_newest_first":
+        checks.append(Check(
+            "row_order", "accounting", Severity.INFO, True,
+            "All transactions share one date and the balances show they are listed newest first; "
+            "balances were checked from the bottom up.",
+        ))
 
     balance_checks, checked, mismatched = _running_balance(numbered, opening)
     checks += balance_checks
