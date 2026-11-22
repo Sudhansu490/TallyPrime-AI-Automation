@@ -31,6 +31,7 @@ import httpx
 from tally_automation.config import Settings
 from tally_automation.network import TAILSCALE_IPV4, TAILSCALE_IPV6
 from tally_automation.tally import masters as m
+from tally_automation.tally.balances import LedgerBalance, ledger_balance_request, parse_ledger_balance
 from tally_automation.tally.importing import (
     ImportResult, TallyVoucher, assert_ledger_create, assert_voucher_import, ledger_create_request,
     marker_lookup_request, parse_import_response, period_vouchers_request,
@@ -225,6 +226,12 @@ class TallyClient:
         body = marker_lookup_request(company, needle, from_date, to_date, entries=entries)
         content, content_type, _ = self._send("POST", body, self.export_timeout)
         return parse_marked_vouchers(decode(content, content_type))
+
+    def ledger_balance(self, company: str, ledger: str, books_from, on) -> LedgerBalance:
+        """One ledger's balance at the end of ``on`` (read-only)."""
+        body = ledger_balance_request(company, ledger, books_from, on)
+        content, content_type, _ = self._send("POST", body, self.export_timeout)
+        return parse_ledger_balance(decode(content, content_type), ledger, on)
 
     def ledger_names(self, company: str) -> set[str]:
         """Every ledger name in the company, lower-cased (read-only), to tell whether a new one exists."""

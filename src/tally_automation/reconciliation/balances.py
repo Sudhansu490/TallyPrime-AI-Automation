@@ -52,6 +52,9 @@ class Row:
     debit: Decimal | None
     credit: Decimal | None
     balance: Decimal | None
+    transaction_id: int | None = None
+    description: str | None = None
+    reference: str | None = None
 
     @property
     def amount_known(self) -> bool:
@@ -117,13 +120,15 @@ def _iso(value: date | None) -> str | None:
 
 def prepare_statement(
     statement_id: int, document_id: int, filename: str, header: dict[str, Any], rows: list[dict[str, Any]],
-    validation: str | None,
+    validation: str | None, row_ids: list[int] | None = None,
 ) -> StatementData:
     """A statement's reviewed fields, read for reconciliation. Only usable values are read (a value the
     reviewer has not fixed counts as not printed); nothing is changed."""
     opening_value = amount(header, "opening_balance")
     numbered, order = chronological_rows(rows, opening_value)
-    parsed = [Row(n, day(r, "txn_date"), amount(r, "debit"), amount(r, "credit"), amount(r, "balance"))
+    ids = row_ids or [None] * len(rows)
+    parsed = [Row(n, day(r, "txn_date"), amount(r, "debit"), amount(r, "credit"), amount(r, "balance"),
+                  ids[n - 1], text(r, "description"), text(r, "reference_number") or text(r, "cheque_number"))
               for n, r in numbered]
     notes: list[str] = []
     printed_from, printed_to = day(header, "period_from"), day(header, "period_to")

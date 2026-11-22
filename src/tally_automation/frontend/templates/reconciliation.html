@@ -50,6 +50,7 @@
   <div class="tabs recon-tabs" role="tablist" aria-label="Reconciliation view">
     <button type="button" class="tab" role="tab" id="tab-monthly" aria-selected="true" aria-controls="panel-monthly">Monthly</button>
     <button type="button" class="tab" role="tab" id="tab-yearly" aria-selected="false" aria-controls="panel-yearly">Financial years</button>
+    <button type="button" class="tab" role="tab" id="tab-transactions" aria-selected="false" aria-controls="panel-transactions">Transactions with TallyPrime</button>
     <button type="button" class="tab" role="tab" id="tab-missing" aria-selected="false" aria-controls="panel-missing">Missing statements</button>
     <button type="button" class="tab" role="tab" id="tab-statements" aria-selected="false" aria-controls="panel-statements">Statements</button>
   </div>
@@ -58,7 +59,11 @@
     <form class="filters" id="monthly-form">
       <label>From month<input type="month" id="month-from" required></label>
       <label>To month<input type="month" id="month-to" required></label>
-      <div class="actions align-end"><button type="submit" class="btn btn-secondary">Show</button></div>
+      <div class="actions align-end">
+        <button type="submit" class="btn btn-secondary">Show</button>
+        <button type="button" class="btn btn-secondary" id="monthly-xlsx">Save &amp; download Excel</button>
+        <button type="button" class="btn btn-secondary" id="monthly-pdf">Save &amp; download PDF</button>
+      </div>
     </form>
     <div id="monthly-message" role="status" aria-live="polite"></div>
     <div class="table-wrap">
@@ -77,7 +82,11 @@
     <form class="filters" id="yearly-form">
       <label>From financial year<select id="fy-from"></select></label>
       <label>To financial year<select id="fy-to"></select></label>
-      <div class="actions align-end"><button type="submit" class="btn btn-secondary">Show</button></div>
+      <div class="actions align-end">
+        <button type="submit" class="btn btn-secondary">Show</button>
+        <button type="button" class="btn btn-secondary" id="yearly-xlsx">Save &amp; download Excel</button>
+        <button type="button" class="btn btn-secondary" id="yearly-pdf">Save &amp; download PDF</button>
+      </div>
     </form>
     <p class="small muted">Financial years run from 1 April to 31 March. Each year's opening balance on 1 April is compared
       with the previous year's closing balance on 31 March.</p>
@@ -91,6 +100,66 @@
         </tr></thead>
         <tbody id="yearly-body"></tbody>
       </table>
+    </div>
+  </div>
+
+  <div id="panel-transactions" role="tabpanel" aria-labelledby="tab-transactions" hidden>
+    <p class="small muted">Compares the statement's transactions with the entries on the linked TallyPrime bank ledger.
+      TallyPrime is only read: nothing is posted or changed there. Exact matches (same date, amount and direction) are
+      matched automatically; every other proposed match waits for a person to approve or reject it.</p>
+    <form class="filters" id="txn-form">
+      <label>From<input type="date" id="txn-from" required></label>
+      <label>To<input type="date" id="txn-to" required></label>
+      <label>Allow dates apart by
+        <select id="txn-window">
+          <option value="0">0 days</option><option value="1">1 day</option><option value="2">2 days</option>
+          <option value="3" selected>3 days</option><option value="5">5 days</option><option value="7">7 days</option>
+          <option value="10">10 days</option>
+        </select>
+      </label>
+      <div class="actions align-end"><button type="submit" class="btn" id="txn-run">Compare with TallyPrime</button></div>
+    </form>
+    <form class="filters" id="txn-saved">
+      <label>Saved comparison<select id="run-select"></select></label>
+      <div class="actions align-end">
+        <a class="btn btn-secondary" id="run-xlsx" href="#" hidden>Download Excel</a>
+        <a class="btn btn-secondary" id="run-pdf" href="#" hidden>Download PDF</a>
+      </div>
+    </form>
+    <div id="txn-message" role="status" aria-live="polite"></div>
+    <div id="txn-result" hidden>
+      <dl class="stat-grid" id="txn-counts"></dl>
+      <h3 class="small-heading">Bank reconciliation statement</h3>
+      <div class="table-wrap">
+        <table class="table brs-table"><tbody id="brs-body"></tbody></table>
+      </div>
+      <h3 class="small-heading">Transactions</h3>
+      <form class="filters" id="txn-filters">
+        <label>Show
+          <select id="txn-filter">
+            <option value="attention">Needs attention</option>
+            <option value="awaiting">Awaiting approval</option>
+            <option value="all">Everything</option>
+            <option value="matched">Matched</option>
+            <option value="partial">Partly matched</option>
+            <option value="duplicate">Duplicates in TallyPrime</option>
+            <option value="bank_only">Only in the statement</option>
+            <option value="tally_only">Only in TallyPrime</option>
+            <option value="not_compared">Not compared</option>
+          </select>
+        </label>
+        <label>Note for decisions <span class="muted">(optional, kept in the history)</span>
+          <input type="text" id="decision-note" maxlength="500" autocomplete="off"></label>
+      </form>
+      <div class="table-wrap">
+        <table class="table recon-table">
+          <thead><tr>
+            <th>Status</th><th>Statement</th><th class="num">Amount</th><th>TallyPrime</th><th class="num">Amount</th>
+            <th class="num">Difference</th><th>Why</th><th>Decision</th>
+          </tr></thead>
+          <tbody id="txn-body"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -109,6 +178,8 @@
         <tbody id="statements-body"></tbody>
       </table>
     </div>
+    <h3 class="small-heading">Saved reconciliations</h3>
+    <ul class="plain-list small" id="saved-runs"></ul>
     <h3 class="small-heading">Change history</h3>
     <ul class="plain-list small" id="events"></ul>
   </div>

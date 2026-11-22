@@ -7,7 +7,7 @@ import { api } from "../api.js";
 import { clear, el, formatDate, formatDateTime, formatINR, showError, showMessage } from "../ui.js";
 
 const $ = (id) => document.getElementById(id);
-const state = { key: null, account: null, tab: "monthly", loaded: {} };
+const state = { key: null, account: null, tab: "monthly", loaded: {}, run: null, runId: null };
 
 const STATUS = {
   matched: ["Matched", "ok"],
@@ -161,6 +161,11 @@ async function loadAccount() {
     renderAccount(account);
     renderStatements(account);
     setDefaultRanges(account);
+    setTransactionDefaults(account);
+    state.run = null;
+    state.runId = null;
+    $("txn-result").hidden = true;
+    clear($("txn-message"));
     for (const id of ["account-card", "summary-card", "views-card"]) $(id).hidden = false;
     await loadTab();
   } catch (error) {
@@ -399,23 +404,264 @@ function renderStatements(a) {
   clear(events);
   if (!a.events.length) events.append(el("li", { className: "muted", text: "No changes yet." }));
   for (const e of a.events) {
-    const what = e.kind === "ledger_linked" ? `Linked to ledger “${e.detail.ledger_name}”` : "Ledger unlinked";
-    events.append(el("li", { text: `${formatDateTime(e.at)} — ${what} by ${e.user ?? "unknown"}${e.note ? ` — “${e.note}”` : ""}` }));
+    events.append(el("li", { text: `${formatDateTime(e.at)} — ${eventText(e)} by ${e.user ?? "unknown"}${e.note ? ` — “${e.note}”` : ""}` }));
   }
   if (a.overlaps.some((o) => !o.agree)) {
     showMessage($("page-message"), "warning", "Some statements of this account overlap and disagree: the months concerned are shown as “Statements disagree”.");
   }
+  loadSavedRuns();
+}
+
+function eventText(e) {
+  const d = e.detail ?? {};
+  const pair = () => [...(d.bank ?? []).map((b) => `statement #${b[0]}/${b[1]} ${money(b[3])}`),
+    ...(d.tally ?? []).map((t) => `${t[1] ?? "voucher"} ${t[2] ?? ""} ${money(t[3])}`)].join(" ↔ ");
+  switch (e.kind) {
+    case "ledger_linked": return `Linked to ledger “${d.ledger_name}”`;
+    case "ledger_unlinked": return "Ledger unlinked";
+    case "run_saved": return `Saved “${d.label}”`;
+    case "report_downloaded": return `Downloaded ${String(d.format).toUpperCase()} of “${d.label}”`;
+    case "match_approved": return `Approved match: ${pair()}`;
+    case "match_rejected": return `Rejected match: ${pair()}`;
+    case "match_reopened": return `Reopened match: ${pair()}`;
+    default: return e.kind;
+  }
+}
+
+async function loadSavedRuns() {
+  const list = $("saved-runs");
+  const select = $("run-select");
+  try {
+    const runs = await api.get(`/reconciliation/accounts/${state.key}/runs`);
+    clear(list);
+    clear(select);
+    if (!runs.length) list.append(el("li", { className: "muted", text: "None saved yet." }));
+    for (const r of runs) {
+      const item = el("li", { text: `#${r.id} ${r.label} — saved ${formatDateTime(r.created_at)} by ${r.created_by ?? "unknown"}` +
+        `${r.stale ? " (statements corrected since)" : ""} ` });
+      item.append(el("a", { text: "Excel", attrs: { href: reportUrl(r.id, "xlsx") } }), el("span", { text: " · " }),
+        el("a", { text: "PDF", attrs: { href: reportUrl(r.id, "pdf") } }));
+      list.append(item);
+    }
+    const comparisons = runs.filter((r) => r.kind === "transactions");
+    select.append(el("option", { text: comparisons.length ? "Choose a saved comparison…" : "None saved yet", attrs: { value: "" } }));
+    for (const r of comparisons) {
+      select.append(el("option", { text: `#${r.id} ${r.label}${r.stale ? " (out of date)" : ""}`, attrs: { value: String(r.id) } }));
+    }
+    if (state.runId && comparisons.some((r) => r.id === state.runId)) select.value = String(state.runId);
+  } catch (error) {
+    showError($("txn-message"), error);
+  }
+}
+
+// ---- Saved reports -------------------------------------------------------------------------------
+
+const reportUrl = (id, format) => `/api/v1/reconciliation/runs/${id}/report.${format}`;
+
+async function saveAndDownload(kind, format) {
+  const message = $(`${kind}-message`);
+  const body = kind === "monthly"
+    ? { kind, month_from: $("month-from").value, month_to: $("month-to").value }
+    : { kind, fy_from: $("fy-from").value, fy_to: $("fy-to").value };
+  showMessage(message, "loading", "Saving the reconciliation…");
+  try {
+    const run = await api.post(`/reconciliation/accounts/${state.key}/runs`, body);
+    showMessage(message, "success", `Saved as reconciliation #${run.id}. The ${format === "xlsx" ? "Excel" : "PDF"} file is downloading.`);
+    window.location.href = reportUrl(run.id, format);
+    loadSavedRuns();
+  } catch (error) {
+    showError(message, error);
+  }
+}
+
+// ---- Transactions with TallyPrime ----------------------------------------------------------------
+
+const MATCH_STATUS = {
+  matched: ["Matched", "ok"], uncertain: ["Uncertain", "warning"], partial: ["Partly matched", "warning"],
+  duplicate: ["Duplicate in TallyPrime", "error"], bank_only: ["Only in the statement", "error"],
+  tally_only: ["Only in TallyPrime", "error"], not_compared: ["Not compared", "neutral"],
+};
+
+async function runTransactions() {
+  const message = $("txn-message");
+  const from = $("txn-from").value;
+  const to = $("txn-to").value;
+  if (!from || !to) { showMessage(message, "warning", "Choose the period first."); return; }
+  $("txn-run").disabled = true;
+  showMessage(message, "loading", "Reading the period from TallyPrime (read only) and comparing… this can take a minute.");
+  try {
+    const run = await api.post(`/reconciliation/accounts/${state.key}/runs`,
+      { kind: "transactions", date_from: from, date_to: to, window_days: Number($("txn-window").value) }, { timeoutMs: 600000 });
+    state.runId = run.id;
+    showMessage(message, "success", `Compared and saved as #${run.id}: ${run.result.bank_transactions} statement transaction(s), ` +
+      `${run.result.tally_entries} TallyPrime entr${run.result.tally_entries === 1 ? "y" : "ies"} on the ledger.`);
+    renderRun(run);
+    loadSavedRuns();
+  } catch (error) {
+    showError(message, error);
+  } finally {
+    $("txn-run").disabled = false;
+  }
+}
+
+async function openRun(id) {
+  if (!id) { $("txn-result").hidden = true; for (const k of ["run-xlsx", "run-pdf"]) $(k).hidden = true; return; }
+  try {
+    const run = await api.get(`/reconciliation/runs/${id}`);
+    state.runId = run.id;
+    clear($("txn-message"));
+    renderRun(run);
+  } catch (error) {
+    showError($("txn-message"), error);
+  }
+}
+
+function renderRun(run) {
+  state.run = run;
+  $("txn-result").hidden = false;
+  $("run-xlsx").href = reportUrl(run.id, "xlsx");
+  $("run-pdf").href = reportUrl(run.id, "pdf");
+  $("run-xlsx").hidden = $("run-pdf").hidden = false;
+  const r = run.result;
+  if (run.stale) {
+    showMessage($("txn-message"), "warning", "The statements have been corrected since this comparison was saved: compare again for current figures.");
+  }
+  const counts = $("txn-counts");
+  clear(counts);
+  const add = (term, value) => counts.append(el("div", { className: "stat" }, [el("dt", { text: term }), el("dd", { text: String(value) })]));
+  add("Matched", r.counts.matched + r.counts.approved);
+  add("Awaiting approval", r.counts.awaiting_approval);
+  add("Only in the statement", r.counts.bank_only);
+  add("Only in TallyPrime", r.counts.tally_only);
+  add("Duplicates in TallyPrime", r.counts.duplicate);
+  add("Not compared", r.counts.excluded + r.counts.unreadable);
+
+  const st = r.statement;
+  const brs = $("brs-body");
+  clear(brs);
+  const line = (label, value, strong) => brs.append(el("tr", {}, [
+    el(strong ? "th" : "td", { text: label, attrs: strong ? { scope: "row" } : {} }),
+    el("td", { className: `num${strong && value !== null && Number(value) !== 0 && label.startsWith("Unexplained") ? " diff-nonzero" : ""}`, text: money(value) }),
+  ]));
+  line(`Balance per TallyPrime on ${formatDate(r.from)} (start of day)`, st.tally_opening);
+  line(`Balance per statement on ${formatDate(r.from)} (start of day)`, st.bank_opening);
+  line("Difference brought forward", st.brought_forward);
+  line(`Balance per TallyPrime on ${formatDate(r.to)}`, st.tally_closing, true);
+  line("+ Transactions only in the statement", st.bank_only_total);
+  line("− Entries only in TallyPrime (incl. duplicates)", st.tally_only_total);
+  line("+ Differences inside matches", st.match_differences);
+  line("= Expected balance per statement", st.expected_bank_closing, true);
+  line(`Balance per statement on ${formatDate(r.to)}`, st.bank_closing, true);
+  line("Unexplained difference", st.unexplained, true);
+  for (const note of [...(r.tally_notes ?? []),
+    ...(r.balances.bank_opening.value === null ? [`Statement opening: ${r.balances.bank_opening.note}`] : []),
+    ...(r.balances.bank_closing.value === null ? [`Statement closing: ${r.balances.bank_closing.note}`] : [])]) {
+    brs.append(el("tr", {}, [el("td", { className: "muted small", text: note, attrs: { colspan: "2" } })]));
+  }
+  if (st.awaiting_approval) {
+    brs.append(el("tr", {}, [el("td", { className: "muted small", attrs: { colspan: "2" },
+      text: `${st.awaiting_approval} proposed match(es) await approval; they count as matched until rejected.` })]));
+  }
+  renderTransactions();
+}
+
+function sideCells(items, kind) {
+  if (!items.length) return [el("td", { text: "—" }), el("td", { className: "num", text: "—" })];
+  const lines = items.map((i) => kind === "bank"
+    ? `${formatDate(i.date)} · #${i.document_id}/${i.row} · ${i.description ?? ""}`
+    : `${formatDate(i.date)} · ${[i.voucher_type, i.number].filter(Boolean).join(" ")} · ${i.narration ?? ""}`);
+  const total = items.reduce((sum, i) => sum + Number(i.signed), 0);
+  return [el("td", { className: "details" }, lines.map((t) => el("div", { text: t }))),
+    el("td", { className: "num", text: items.length === 1 ? money(items[0].signed) : formatINR(total.toFixed(2)) })];
+}
+
+function transactionRows() {
+  const r = state.run.result;
+  const rows = r.matches.map((m) => ({ status: m.status, match: m, bank: m.bank, tally: m.tally, reason: m.reason, difference: m.difference }));
+  rows.push(...r.bank_only.map((b) => ({ status: "bank_only", bank: [b], tally: [], reason: b.from_rejected_match ? "Match rejected." : "No TallyPrime entry found." })));
+  rows.push(...r.tally_only.map((t) => ({ status: "tally_only", bank: [], tally: [t], reason: t.from_rejected_match ? "Match rejected." : "Not found on the statement." })));
+  rows.push(...[...r.excluded, ...r.unreadable].map((x) => ({ status: "not_compared", bank: [], tally: [], reason: x.reason, item: x })));
+  return rows;
+}
+
+function renderTransactions() {
+  const body = $("txn-body");
+  clear(body);
+  const filter = $("txn-filter").value;
+  const rows = transactionRows().filter((row) => {
+    const rejected = row.match?.decision?.decision === "rejected";
+    if (filter === "all") return true;
+    if (filter === "attention") return row.status !== "matched" && !(row.match?.needs_approval && row.match.decision);
+    if (filter === "awaiting") return row.match?.needs_approval && !row.match.decision;
+    if (filter === "matched") return row.match && !rejected && (row.status === "matched" || row.match.decision);
+    return row.status === filter;
+  });
+  if (!rows.length) body.append(el("tr", {}, [el("td", { className: "muted", text: "Nothing to show.", attrs: { colspan: "8" } })]));
+  for (const row of rows) {
+    const [label, kind] = MATCH_STATUS[row.status] ?? [row.status, "neutral"];
+    const cells = [el("td", {}, [badge(label, kind)])];
+    if (row.status === "not_compared") {
+      cells.push(el("td", { className: "details", attrs: { colspan: "5" },
+        text: `#${row.item.document_id}/${row.item.row} ${row.item.date ? formatDate(row.item.date) : ""} ${row.item.description ?? ""}` }));
+    } else {
+      cells.push(...sideCells(row.bank, "bank"), ...sideCells(row.tally, "tally"), differenceCell(row.difference ?? null));
+    }
+    cells.push(el("td", { className: "details", text: row.reason }), decisionCell(row.match));
+    body.append(el("tr", {}, cells));
+  }
+}
+
+function decisionCell(match) {
+  const cell = el("td");
+  if (!match || match.status === "duplicate") return cell;
+  if (match.decision) {
+    const d = match.decision;
+    cell.append(badge(d.decision === "approved" ? "Approved" : "Rejected", d.decision === "approved" ? "ok" : "error"),
+      el("span", { className: "figure-source", text: `${d.by ?? "unknown"}, ${formatDateTime(d.at)}${d.note ? ` — “${d.note}”` : ""}` }));
+    cell.append(decisionButton("Reopen", match, "reopened"));
+    return cell;
+  }
+  if (match.needs_approval) cell.append(decisionButton("Approve", match, "approved"));
+  cell.append(decisionButton("Reject", match, "rejected"));
+  return cell;
+}
+
+function decisionButton(text, match, decision) {
+  const button = el("button", { className: "btn btn-secondary btn-small", text, attrs: { type: "button" } });
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const run = await api.post(`/reconciliation/runs/${state.runId}/matches/${match.signature}`,
+        { decision, note: $("decision-note").value.trim() || null });
+      renderRun(run);
+    } catch (error) {
+      showError($("txn-message"), error);
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function setTransactionDefaults(a) {
+  if (!a.last_day) return;
+  const last = a.last_day;
+  const firstOfMonth = `${last.slice(0, 7)}-01`;
+  $("txn-from").value = a.first_day > firstOfMonth ? a.first_day : firstOfMonth;
+  $("txn-to").value = last;
 }
 
 async function loadTab() {
   if (state.tab === "monthly") await loadMonthly();
   else if (state.tab === "yearly") await loadYearly();
   else if (state.tab === "missing") await loadMissing();
+  else if (state.tab === "transactions" && state.runId && !state.run) await openRun(state.runId);
 }
+
+const TABS = ["monthly", "yearly", "transactions", "missing", "statements"];
 
 function selectTab(tab) {
   state.tab = tab;
-  for (const name of ["monthly", "yearly", "missing", "statements"]) {
+  for (const name of TABS) {
     $(`tab-${name}`).setAttribute("aria-selected", String(name === tab));
     $(`panel-${name}`).hidden = name !== tab;
   }
@@ -431,6 +677,14 @@ $("ledger-form").addEventListener("submit", (e) => { e.preventDefault(); saveLin
 $("ledger-unlink").addEventListener("click", () => saveLink(null));
 $("monthly-form").addEventListener("submit", (e) => { e.preventDefault(); loadMonthly(); });
 $("yearly-form").addEventListener("submit", (e) => { e.preventDefault(); loadYearly(); });
-for (const name of ["monthly", "yearly", "missing", "statements"]) $(`tab-${name}`).addEventListener("click", () => selectTab(name));
+for (const kind of ["monthly", "yearly"]) {
+  for (const format of ["xlsx", "pdf"]) $(`${kind}-${format}`).addEventListener("click", () => saveAndDownload(kind, format));
+}
+$("txn-form").addEventListener("submit", (e) => { e.preventDefault(); runTransactions(); });
+$("run-select").addEventListener("change", (e) => openRun(Number(e.target.value) || null));
+$("txn-filter").addEventListener("change", () => { if (state.run) renderTransactions(); });
+$("txn-filters").addEventListener("submit", (e) => e.preventDefault());
+$("txn-saved").addEventListener("submit", (e) => e.preventDefault());
+for (const name of TABS) $(`tab-${name}`).addEventListener("click", () => selectTab(name));
 
 loadAccounts();

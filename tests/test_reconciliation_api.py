@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import itertools
+
+import openpyxl
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,9 +18,10 @@ from tally_fakes import COMPANY, COMPANY_GUID, FakeTally
 from test_extraction_api import process, text_pdf, upload
 from tally_automation.db.models import (
     BankStatement, BankTransaction, Document, DocumentFile, DocumentStatus, DocumentType, ExtractionRun, JobStatus,
-    MediaType, ProcessingJob, ReconciliationAccount, ReconciliationEvent, UserRole, ValidationOutcome,
-    ValidationResult,
+    MediaType, ProcessingJob, ReconciliationAccount, ReconciliationEvent, ReconciliationRun, UserRole,
+    ValidationOutcome, ValidationResult,
 )
+from tally_automation.tally.xmlio import assert_read_only
 
 ACCOUNT = "123456789012"
 _counter = itertools.count(1)
@@ -195,3 +199,140 @@ def test_viewers_can_read_but_not_link(client: TestClient, three_months: str, ta
 
 def test_ledger_list_needs_retrieved_masters(client: TestClient) -> None:
     assert client.get("/api/v1/reconciliation/companies/unknown/bank-ledgers").status_code == 409
+
+
+# ---- Transactions with TallyPrime, saved runs, decisions, reports --------------------------------------------
+
+def voucher(n: int, day: str, kind: str, bank_amount: str, narration: str = "SYNTHETIC") -> dict:
+    other = "-" + bank_amount if not bank_amount.startswith("-") else bank_amount[1:]
+    return {"date": day, "type": kind, "narration": narration, "guid": f"synthetic-v{n}", "master_id": str(n),
+            "number": str(n), "entries": [("Synthetic Bank", bank_amount), ("Synthetic Supplier Pvt Ltd", other)]}
+
+
+@pytest.fixture
+def april(client: TestClient, tally: FakeTally) -> str:
+    """April 2026 statement, its TallyPrime side, and the account linked to the bank ledger. Returns the key.
+
+    Statement: opening 1000, +500 (5th), −200 (20th), −5.61 twice (25th), closing 1288.78.
+    TallyPrime: +500 (5th), −200 (21st), −5.61 once (25th), −1000 (28th, not on the statement);
+    ledger 1000.00 (debit) on 31 March, 294.39 on 30 April.
+    """
+    seed_statement(client, "2026-04-01", "2026-04-30", "1000.00", "1288.78", [
+        ("2026-04-05", None, "500.00", "1500.00"), ("2026-04-20", "200.00", None, "1300.00"),
+        ("2026-04-25", "5.61", None, "1294.39"), ("2026-04-25", "5.61", None, "1288.78")])
+    tally.vouchers += [voucher(1, "20260405", "Receipt", "-500.00"), voucher(2, "20260421", "Payment", "200.00"),
+                       voucher(3, "20260425", "Payment", "5.61"), voucher(4, "20260428", "Payment", "1000.00"),
+                       voucher(5, "20260410", "Journal", "0")]
+    tally.ledger_balances.update({"20260331": "-1000.00", "20260430": "-294.39"})
+    key = client.get("/api/v1/reconciliation/accounts").json()["accounts"][0]["key"]
+    assert client.post(f"/api/v1/reconciliation/accounts/{key}/ledger",
+                       json={"company_guid": COMPANY_GUID, "ledger_guid": "l-Synthetic Bank"}).status_code == 200
+    tally.requests.clear()
+    return key
+
+
+def compare(client: TestClient, key: str, **extra) -> dict:
+    response = client.post(f"/api/v1/reconciliation/accounts/{key}/runs",
+                           json={"kind": "transactions", "date_from": "2026-04-01", "date_to": "2026-04-30", **extra})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_transactions_are_compared_with_tally_read_only(client: TestClient, april: str, tally: FakeTally) -> None:
+    run = compare(client, april)
+    r = run["result"]
+    assert (r["bank_transactions"], r["tally_entries"]) == (4, 4)
+    assert r["counts"]["matched"] == 2 and r["counts"]["awaiting_approval"] == 1
+    assert (r["counts"]["bank_only"], r["counts"]["tally_only"]) == (1, 1)
+    st = r["statement"]
+    assert (st["tally_opening"], st["tally_closing"], st["bank_opening"], st["bank_closing"]) == (
+        "1000.00", "294.39", "1000.00", "1288.78")
+    assert st["expected_bank_closing"] == "1288.78" and st["unexplained"] == "0.00"
+    # Only export (read) requests reached TallyPrime: vouchers and two ledger balances.
+    assert tally.imports == 0 and tally.requests
+    for request in tally.requests:
+        assert_read_only(request.content.decode())
+    assert ACCOUNT not in client.get(f"/api/v1/reconciliation/runs/{run['id']}").text
+
+
+def test_decisions_are_audited_and_carry_over_to_the_next_comparison(client: TestClient, april: str) -> None:
+    run = compare(client, april)
+    uncertain = next(m for m in run["result"]["matches"] if m["needs_approval"])
+    exact = next(m for m in run["result"]["matches"] if m["status"] == "matched")
+    url = f"/api/v1/reconciliation/runs/{run['id']}/matches"
+
+    assert client.post(f"{url}/{exact['signature']}", json={"decision": "approved"}).status_code == 422
+    approved = client.post(f"{url}/{uncertain['signature']}", json={"decision": "approved", "note": "same cheque"})
+    assert approved.status_code == 200 and approved.json()["result"]["counts"]["approved"] == 1
+    assert client.post(f"{url}/{uncertain['signature']}", json={"decision": "approved"}).status_code == 409
+
+    again = compare(client, april)                      # a later comparison of the same entries
+    carried = next(m for m in again["result"]["matches"] if m["signature"] == uncertain["signature"])
+    assert carried["decision"]["decision"] == "approved" and carried["decision"]["note"] == "same cheque"
+
+    rejected = client.post(f"/api/v1/reconciliation/runs/{again['id']}/matches/{uncertain['signature']}",
+                           json={"decision": "rejected"}).json()["result"]
+    assert rejected["counts"]["bank_only"] == 2 and rejected["statement"]["unexplained"] == "0.00"
+    assert client.post(f"{url}/{uncertain['signature']}", json={"decision": "reopened"}).status_code == 200
+    assert client.post(f"{url}/{uncertain['signature']}", json={"decision": "reopened"}).status_code == 409
+    assert client.post(f"{url}/{'f' * 40}", json={"decision": "rejected"}).status_code == 404
+
+    kinds = [e["kind"] for e in client.get(f"/api/v1/reconciliation/accounts/{april}").json()["events"]]
+    assert kinds[:4] == ["match_reopened", "match_rejected", "run_saved", "match_approved"]
+    # The saved comparison itself never changes.
+    with client.app.state.session_factory() as s:
+        stored = s.get(ReconciliationRun, run["id"]).result
+        assert next(m for m in stored["matches"] if m["signature"] == uncertain["signature"]).get("decision") is None
+
+
+def test_reports_download_and_are_recorded(client: TestClient, april: str) -> None:
+    run = compare(client, april)
+    xlsx = client.get(f"/api/v1/reconciliation/runs/{run['id']}/report.xlsx")
+    assert xlsx.status_code == 200 and xlsx.headers["content-type"].startswith("application/vnd.openxmlformats")
+    assert 'attachment; filename="bank-reconciliation-' in xlsx.headers["content-disposition"]
+    workbook = openpyxl.load_workbook(io.BytesIO(xlsx.content))
+    assert "Matches" in workbook.sheetnames
+    assert ACCOUNT not in str([[c.value for c in row] for ws in workbook for row in ws.iter_rows()])
+    pdf = client.get(f"/api/v1/reconciliation/runs/{run['id']}/report.pdf")
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+    assert client.get(f"/api/v1/reconciliation/runs/{run['id']}/report.csv").status_code == 422
+    kinds = [e["kind"] for e in client.get(f"/api/v1/reconciliation/accounts/{april}").json()["events"]]
+    assert kinds[:2] == ["report_downloaded", "report_downloaded"]
+
+    login_as(client, UserRole.VIEWER)
+    assert client.get(f"/api/v1/reconciliation/runs/{run['id']}/report.pdf").status_code == 200
+    assert client.post(f"/api/v1/reconciliation/accounts/{april}/runs",
+                       json={"kind": "monthly", "month_from": "2026-04", "month_to": "2026-04"}).status_code == 403
+
+
+def test_balance_runs_are_saved_and_marked_out_of_date_after_a_correction(client: TestClient, three_months: str) -> None:
+    url = f"/api/v1/reconciliation/accounts/{three_months}/runs"
+    monthly = client.post(url, json={"kind": "monthly", "month_from": "2026-04", "month_to": "2026-06"}).json()
+    assert monthly["label"] == "Monthly 2026-04 to 2026-06" and not monthly["stale"]
+    assert [p["status"] for p in monthly["result"]["periods"]] == ["matched", "missing", "matched"]
+    yearly = client.post(url, json={"kind": "yearly", "fy_from": "2026-27", "fy_to": "2026-27"}).json()
+    assert yearly["result"]["coverage"]["missing_months"][0] == "2026-05"
+    report = client.get(f"/api/v1/reconciliation/runs/{monthly['id']}/report.xlsx")
+    sheets = openpyxl.load_workbook(io.BytesIO(report.content)).sheetnames
+    assert sheets == ["Summary", "Months", "Missing statements", "Statements used"]
+
+    with client.app.state.session_factory.begin() as s:          # a reviewer corrects a closing balance
+        statement = s.scalars(select(BankStatement).order_by(BankStatement.id)).first()
+        statement.fields = {**statement.fields, "closing_balance": f("1301.00")}
+    assert client.get(f"/api/v1/reconciliation/runs/{monthly['id']}").json()["stale"] is True
+    runs = client.get(url).json()
+    assert [r["kind"] for r in runs] == ["yearly", "monthly"] and all(r["stale"] for r in runs)
+    assert client.post(url, json={"kind": "monthly", "month_from": "2026-06", "month_to": "2026-04"}).status_code == 422
+
+
+def test_comparison_needs_a_linked_ledger_and_a_reachable_tally(client: TestClient, three_months: str, tally: FakeTally) -> None:
+    url = f"/api/v1/reconciliation/accounts/{three_months}/runs"
+    body = {"kind": "transactions", "date_from": "2026-04-01", "date_to": "2026-04-30"}
+    assert client.post(url, json=body).json()["code"] == "not_linked"
+    client.post(f"/api/v1/reconciliation/accounts/{three_months}/ledger",
+                json={"company_guid": COMPANY_GUID, "ledger_guid": "l-Synthetic Bank"})
+    assert client.post(url, json={**body, "date_to": "2027-05-01"}).status_code == 422          # over a year
+    tally.fail = "connect"
+    response = client.post(url, json=body)
+    assert response.status_code == 502 and response.json()["code"] == "tally_error"
+    assert client.get(url).json() == []                                                        # nothing saved

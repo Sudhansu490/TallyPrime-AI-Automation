@@ -175,6 +175,7 @@ class TallyVoucher:
     deleted: bool
     entries: list[TallyEntry] = field(default_factory=list)
     number: str | None = None
+    reference: str | None = None
 
 
 def _date(value: str | None) -> date | None:
@@ -203,7 +204,7 @@ def parse_marked_vouchers(xml: str) -> list[TallyVoucher]:
             voucher_type=text(v, "VOUCHERTYPENAME"), narration=narration,
             markers=MARKER_IN_TEXT.findall(narration or ""),
             deleted=(text(v, "ISDELETED") or "No").lower() == "yes" or (text(v, "ISCANCELLED") or "No").lower() == "yes",
-            entries=entries, number=text(v, "VOUCHERNUMBER"),
+            entries=entries, number=text(v, "VOUCHERNUMBER"), reference=text(v, "REFERENCE"),
         ))
     return out
 

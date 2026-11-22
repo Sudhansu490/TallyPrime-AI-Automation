@@ -118,6 +118,10 @@ class FakeTally:
         # New ledgers created through a ledger import: (name, parent); "refuse" makes them fail.
         self.created_ledgers: list[tuple[str, str]] = []
         self.ledger_mode = "ok"
+        # Bank reconciliation: a ledger's closing balance by SVTODATE ("YYYYMMDD" -> TallyPrime-signed amount,
+        # "" for TallyPrime's empty zero), and its opening balance at the start of the books.
+        self.ledger_balances: dict[str, str] = {}
+        self.ledger_opening = ""
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -137,6 +141,8 @@ class FakeTally:
         collection = re.search(r'<COLLECTION NAME="App(\w+)"', body).group(1)
         if collection in ("MarkedVouchers", "PeriodVouchers"):
             return self._lookup(body)
+        if collection == "LedgerBalance":
+            return self._ledger_balance(body)
         company = re.search(r"<SVCURRENTCOMPANY>(.*?)</SVCURRENTCOMPANY>", body)
         if collection in self.overrides:
             text = self.overrides[collection]
@@ -182,6 +188,14 @@ class FakeTally:
                                                                     f"Group '{parent}' does not exist!"))
         self.created_ledgers.append((name, parent))
         return httpx.Response(200, text=IMPORT_CREATED.format(id=0))
+
+    def _ledger_balance(self, body: str) -> httpx.Response:
+        name = re.search(r'\$Name = "([^"]+)"', body).group(1).replace("&amp;", "&")
+        end = re.search(r"<SVTODATE[^>]*>(\d{8})<", body).group(1)
+        closing = self.ledger_balances.get(end, "")
+        item = (f'    <LEDGER NAME="{escape(name)}" RESERVEDNAME=""><CLOSINGBALANCE TYPE="Amount">{closing}</CLOSINGBALANCE>'
+                f'<OPENINGBALANCE TYPE="Amount">{self.ledger_opening}</OPENINGBALANCE>{_names(escape(name))}</LEDGER>\n')
+        return httpx.Response(200, text=_envelope(item), headers={"content-type": "text/xml; charset=utf-8"})
 
     def _lookup(self, body: str) -> httpx.Response:
         found = re.search(r'\$Narration Contains "([^"]+)"', body)
