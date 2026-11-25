@@ -593,3 +593,32 @@ def test_learning_says_at_once_when_the_company_is_not_open_and_reads_month_by_m
     assert local.post(f"/api/v1/tally/companies/{COMPANY_GUID}/learn").status_code == 200
     reads = [r for r in tally.requests if b"AppPeriodVouchers" in r.content]
     assert 12 <= len(reads) <= 13                                             # a year, a month per request
+
+
+def test_vouchers_deleted_in_tally_are_released_after_checking_again(local: TestClient, tally: FakeTally) -> None:
+    document_id, (payment, contra) = statement_vouchers(local)
+    enable_writes(local)
+    assert approve_import(local, document_id).json()["imported"] == 2
+    # Deleted by hand in TallyPrime (e.g. imported into the wrong company).
+    tally.vouchers = [v for v in tally.vouchers if payment["marker"] not in v["narration"]]
+    out, into = setup(local, document_id)["statement"]["transactions"]
+    again = lambda ids: generate(local, document_id, statement={
+        "bank": guid("Synthetic Bank"), "voucher_types": {"payment": "Payment", "receipt": "Receipt", "contra": "Contra"},
+        "transactions": [{"transaction_id": i, "ledger": guid("Synthetic Supplier Pvt Ltd" if i == out["id"] else "Synthetic Cash")}
+                         for i in ids]})
+    refused = again([out["id"]])
+    assert refused.status_code == 409 and refused.json()["code"] == "already_imported"
+
+    tally.loaded = False
+    closed = local.post(f"/api/v1/documents/{document_id}/recheck-tally")
+    assert closed.status_code == 409 and closed.json()["code"] == "company_not_open"
+    tally.loaded = True
+    imports_before = tally.imports
+    body = local.post(f"/api/v1/documents/{document_id}/recheck-tally").json()
+    assert (body["checked"], body["released"], body["still_in_tally"]) == (2, 1, 1), body
+    assert tally.imports == imports_before                                  # read only
+    history = local.get(f"/api/v1/vouchers/{payment['id']}/history").json()
+    assert "deleted there" in history["approvals"][-1]["note"]
+
+    assert again([out["id"]]).status_code == 200                            # the deleted one can be generated again
+    assert again([into["id"]]).json()["code"] == "already_imported"         # the one still in TallyPrime stays locked

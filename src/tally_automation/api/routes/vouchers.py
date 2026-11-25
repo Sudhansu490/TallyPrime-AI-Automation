@@ -41,6 +41,7 @@ from tally_automation.vouchers import approval
 from tally_automation.vouchers.document_import import approve_and_import_document
 from tally_automation.vouchers.importer import import_voucher
 from tally_automation.vouchers.tally_entries import find_entered
+from tally_automation.vouchers.recheck import release_deleted
 from tally_automation.vouchers.service import (
     InvoiceChoice, NewLedger, StatementChoice, VoucherError, document_vouchers, generate_invoice, generate_statement,
     prepare, stale_reasons,
@@ -299,7 +300,7 @@ _user_names = user_names
 _ERROR_STATUS = {
     "not_found": 404, "no_extraction": 409, "not_eligible": 409, "no_masters": 409, "wrong_type": 409,
     "excluded_transaction": 409, "mapping_incomplete": 422, "unknown_ledger": 422, "unknown_transaction": 422,
-    "warnings_not_acknowledged": 422, "invalid_new_ledger": 422, "no_vouchers": 409, "write_disabled": 409, "not_configured": 409, "same_person": 403,
+    "warnings_not_acknowledged": 422, "invalid_new_ledger": 422, "no_vouchers": 409, "company_not_open": 409, "write_disabled": 409, "not_configured": 409, "same_person": 403,
 }
 
 
@@ -370,6 +371,13 @@ class EnteredOut(BaseModel):
     by_this_app: bool
 
 
+class RecheckOut(BaseModel):
+    checked: int
+    released: int
+    still_in_tally: int
+    message: str
+
+
 class TallyEntriesOut(BaseModel):
     checked: bool                    # False: TallyPrime could not be asked (not running, company not open…)
     message: str
@@ -377,6 +385,36 @@ class TallyEntriesOut(BaseModel):
 
 
 # ---- Endpoints --------------------------------------------------------------------------------
+
+@router.post("/documents/{document_id}/recheck-tally", response_model=RecheckOut, responses={404: {}, 409: {}, 502: {}})
+def recheck_tally(document_id: int, request: Request, settings: SettingsDep, user: Approver) -> RecheckOut | JSONResponse:
+    """Release this document's imported vouchers that TallyPrime no longer has (deleted there), so it can be
+    generated again. Read only towards TallyPrime."""
+    try:
+        tally = create_tally_client(settings, transport=getattr(request.app.state, "tally_transport", None))
+    except TallyConfigError as exc:
+        return _error(VoucherError("not_configured", str(exc)))
+    client = request.client.host if request.client else None
+    try:
+        with tally:
+            r = release_deleted(request.app.state.session_factory, tally, document_id, client_address=client,
+                                user_id=user.id)
+    except VoucherError as exc:
+        return _error(exc)
+    except (TallyConnectionError, TallyResponseError) as exc:
+        return JSONResponse(status_code=502, content={"detail": f"TallyPrime could not be checked: {exc}",
+                                                      "code": "tally_error"})
+    if not r.checked:
+        message = "None of this document's vouchers is recorded as imported."
+    elif r.released and r.still_in_tally:
+        message = (f"{r.released} voucher(s) are no longer in TallyPrime and were released; {r.still_in_tally} are "
+                   "still there and stay locked. Generate again to create the released ones.")
+    elif r.released:
+        message = f"{r.released} voucher(s) are no longer in TallyPrime and were released: generate again now."
+    else:
+        message = f"All {r.still_in_tally} imported voucher(s) are still in TallyPrime; nothing was released."
+    return RecheckOut(checked=r.checked, released=r.released, still_in_tally=r.still_in_tally, message=message)
+
 
 @router.get("/documents/{document_id}/tally-entries", response_model=TallyEntriesOut, responses={404: {}, 409: {}})
 def tally_entries(

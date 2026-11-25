@@ -396,6 +396,35 @@ _NOT_A_TRANSACTION = re.compile(r"opening balance|closing balance|brought forwar
                                 re.IGNORECASE)
 
 
+_COLUMN_GAP = re.compile(r"\s{3,}")
+_LEADING_DATES = re.compile(r"\s*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s+)+")  # the date columns, up to the narration
+
+
+def _narration(lines: list[str], index: int) -> str | None:
+    """The narration of the transaction on ``lines[index]``, in full: the narration column of its dated line
+    plus the wrapped lines below it that start in the same column (not amounts, not the next transaction).
+    The next column (cheque number, amounts) is left out: columns are separated by wide gaps."""
+    line = lines[index]
+    leading = _LEADING_DATES.match(line)
+    start = leading.end() if leading else len(line) - len(line.lstrip())
+    first_amount = next(_COLUMN_AMOUNT.finditer(line, start), None)
+    text = line[start: first_amount.start() if first_amount else len(line)].strip()
+    parts = [_COLUMN_GAP.split(text)[0]] if text else []
+    for below in lines[index + 1:index + 5]:
+        if _DATED_LINE.match(below):
+            break
+        text = below.strip()
+        if not text or _COLUMN_AMOUNT.fullmatch(text):
+            continue                         # an amount printed on its own line, not narration
+        if abs((len(below) - len(below.lstrip())) - start) > 3:
+            break                            # not in the narration column (a page footer or heading)
+        parts.append(_COLUMN_GAP.split(text)[0])
+    joined = ""
+    for part in (" ".join(p.split()) for p in parts):
+        joined += part if not joined or joined.endswith(("-", "/")) else " " + part  # a line broken at a separator
+    return joined or None
+
+
 def _layout_rows(layouts: dict[int, tuple[list[str], dict[str, int]]]) -> list[tuple[int, int, dict[str, str | None]]] | None:
     """Every transaction read from its printed columns, in printed order: (page, line index, raw values).
     None when a dated line holds amounts that cannot be told apart (then the layout is not trusted)."""
@@ -413,9 +442,7 @@ def _layout_rows(layouts: dict[int, tuple[list[str], dict[str, int]]]) -> list[t
                 return None
             side, amount = amounts[0]
             dates = _DATE_TOKEN.findall(line)
-            first_amount = next(_COLUMN_AMOUNT.finditer(line), None)
-            text = line[: first_amount.start()] if first_amount else line
-            description = " ".join(_DATE_TOKEN.sub(" ", text).split())
+            description = _narration(lines, index)
             out.append((page_number, index, {
                 "txn_date": dates[0], "value_date": dates[1] if len(dates) > 1 else None,
                 "description": description or None, side: amount, "balance": printed["balance"][0],
@@ -469,8 +496,12 @@ def rows_from_layout(result: ExtractionResult, pages: list[PageInput], *, low_co
         if match:
             model_row = match.pop(0)
             for name in ("description", "reference_number", "cheque_number"):
-                if model_row.fields.get(name) is not None and model_row.fields[name].value is not None:
-                    row.fields[name] = model_row.fields[name]
+                model_field = model_row.fields.get(name)
+                if model_field is None or model_field.value is None:
+                    continue
+                if name == "description" and len(row.fields[name].value or "") > len(model_field.value):
+                    continue          # the printed narration in full (with its wrapped lines) beats a cut-short one
+                row.fields[name] = model_field
         for name in ("txn_date", "debit", "credit", "balance"):
             row.fields[name].flags.append("from_layout")
     result.rows[:] = built

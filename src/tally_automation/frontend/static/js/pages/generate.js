@@ -300,9 +300,29 @@ async function generate(event) {
     $("vouchers-card").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
     showError($("generate-message"), error);
+    if (error?.body?.code === "already_imported") offerRecheck();
   } finally {
     button.disabled = false;
   }
+}
+
+/** Vouchers recorded as imported can be released when they were deleted in TallyPrime since. */
+function offerRecheck() {
+  const recheck = el("button", { className: "btn btn-secondary btn-small", text: "Check TallyPrime again", attrs: { type: "button" } });
+  recheck.addEventListener("click", async () => {
+    recheck.disabled = true;
+    showMessage($("generate-message"), "loading", "Looking for this document's vouchers in TallyPrime (read only)…");
+    try {
+      const r = await api.post(`/documents/${state.documentId}/recheck-tally`, {}, { timeoutMs: 300000 });
+      showMessage($("generate-message"), r.released ? "success" : "info", r.message);
+      if (r.released) await loadVouchers({ keepMessage: true });
+    } catch (error) {
+      showError($("generate-message"), error);
+    }
+  });
+  $("generate-message").append(el("p", { className: "small" }, [
+    el("span", { text: "Deleted these entries in TallyPrime? " }), recheck,
+  ]));
 }
 
 // ---- Generated vouchers --------------------------------------------------------------------------

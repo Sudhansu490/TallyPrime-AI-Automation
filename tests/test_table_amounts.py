@@ -184,8 +184,28 @@ def test_rows_proven_by_the_running_balance_replace_the_models_and_add_skipped_o
     assert (charge.fields["debit"].value, charge.fields["credit"].raw) == ("5.00", None)
     assert (deposit.fields["credit"].value, deposit.fields["debit"].raw, deposit.fields["balance"].value) == (
         "2500.00", None, "11495.00")
-    assert first.fields["description"].value == "SYNTHETIC VENDOR"           # the model's narration is kept
+    assert first.fields["description"].value == "NEFT-SYNB000001-SYNTHETIC VENDOR"   # printed in full, not cut short
     assert "running balance confirms all 3" in result.document_check_issues[-1]
+
+
+def test_a_narration_wrapped_onto_following_lines_is_read_in_full() -> None:
+    from tally_automation.extraction.table_amounts import rows_from_layout
+    indent = " " * len("01/04/2026  01/04/2026  ")
+    lines = [
+        _columns_line("01/04/2026", "NEFT-SYNB000001-", debit="1,000.00", balance="9,000.00Cr"),
+        indent + "SYNTHETIC VENDOR PRIVATE",
+        indent + "LIMITED",
+        COLUMNS_ROWS[1], COLUMNS_ROWS[2],
+        "Page 1 of 1",
+    ]
+    text = "\n".join(["SYNTHETIC BANK - STATEMENT OF ACCOUNT", COLUMNS_HEADER, *lines])
+    result, pages = extract([row(lines[0], txn_date="01/04/2026", debit="1,000.00", balance="9,000.00Cr",
+                                 description="NEFT-SYNB000001-")], text=text)
+    assert rows_from_layout(result, pages, low_confidence=0.8) == 3
+    first, charge, deposit = result.rows
+    assert first.fields["description"].value == "NEFT-SYNB000001-SYNTHETIC VENDOR PRIVATE LIMITED"
+    assert charge.fields["description"].value == "Charges for SYNTHETIC payment"
+    assert deposit.fields["description"].value == "NEFT-SYNB000002-SYNTHETIC CUSTOMER"   # the page footer stays out
 
 
 def test_rows_are_not_replaced_when_the_running_balance_does_not_prove_them() -> None:
